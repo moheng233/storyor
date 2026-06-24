@@ -11,6 +11,8 @@
 
 ## 输出格式
 严格输出 JSON：
+- 只输出一个 JSON 对象，不要输出 Markdown 代码块
+- 不要在 JSON 前后添加解释文字
 ```json
 {
   "segments": [

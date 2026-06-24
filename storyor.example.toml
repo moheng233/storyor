@@ -28,4 +28,5 @@ max_concurrency = 4
 output_dir = "./output"
 max_paragraph_lines = 20
 audio_format = "mp3"
+tts_voice = "mimo_default"
 tts_timeout_secs = 120

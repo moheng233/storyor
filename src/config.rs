@@ -26,6 +26,9 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     /// 模型标识
     pub model: String,
+    /// 最大输出 token 数（None = 使用 API 默认值）
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 impl ModelConfig {
@@ -62,9 +65,12 @@ pub struct AppConfig {
     /// 段落长度上限（台词行数）
     #[serde(default = "default_max_paragraph_lines")]
     pub max_paragraph_lines: usize,
-    /// 音频格式（mp3/wav/...）
+    /// 音频格式（mp3/wav/pcm/pcm16）
     #[serde(default = "default_audio_format")]
     pub audio_format: String,
+    /// TTS 音色（默认 mimo_default）
+    #[serde(default = "default_tts_voice")]
+    pub tts_voice: String,
     /// TTS 请求超时（秒）
     #[serde(default = "default_tts_timeout")]
     pub tts_timeout_secs: u64,
@@ -88,6 +94,10 @@ fn default_max_paragraph_lines() -> usize {
 
 fn default_audio_format() -> String {
     "mp3".to_string()
+}
+
+fn default_tts_voice() -> String {
+    "mimo_default".to_string()
 }
 
 fn default_tts_timeout() -> u64 {

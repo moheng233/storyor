@@ -56,7 +56,7 @@ fn default_template(name: &str) -> Option<String> {
 ```json
 {
   "characters": [{"name":"角色名","profile":"简介","scene":"场景","guidance":"TTS音色设定"}],
-  "paragraphs": [{"index":0,"lines":[{"speaker":"旁白","content":"台词","tags":["情绪标签"]}]}],
+    "paragraphs": [{"index":0,"lines":[{"speaker":"旁白","content":"（低沉，缓慢）台词"}]}],
   "handoff": "下一段剧情衔接说明"
 }
 ```
@@ -126,7 +126,7 @@ fn default_template(name: &str) -> Option<String> {
 ```json
 {
   "characters": [{"name":"角色名","profile":"简介","scene":"场景","guidance":"TTS音色设定"}],
-  "paragraphs": [{"index":0,"lines":[{"speaker":"旁白","content":"台词","tags":["情绪标签"]}]}],
+    "paragraphs": [{"index":0,"lines":[{"speaker":"旁白","content":"（低沉，缓慢）台词"}]}],
   "handoff": "下一段剧情衔接说明"
 }
 ```

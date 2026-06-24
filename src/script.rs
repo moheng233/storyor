@@ -79,11 +79,11 @@ pub struct CharacterLibrary {
 pub struct ScriptLine {
     /// 说话者（角色名或 "旁白"）
     pub speaker: String,
-    /// 台词内容
+    /// 台词内容，需直接内联情绪/动作提示，例如：
+    /// "（紧张，深呼吸）呼……冷静，冷静。"
     pub content: String,
-    /// 情绪/场景标签
-    #[serde(default)]
-    pub tags: Vec<String>,
+    /// 导演模式描述：从角色/场景/指导三个维度刻画当前台词的演绎方式
+    pub description: String,
 }
 
 /// 段落：一组连续台词，作为一次 TTS 调用的单位
@@ -119,6 +119,8 @@ pub struct AudioClip {
     pub segment_index: usize,
     /// 对应段落序号
     pub paragraph_index: usize,
+    /// 对应行序号
+    pub line_index: usize,
     /// 音频文件相对路径
     pub audio_path: String,
     /// 时长（秒），如可获取
@@ -136,7 +138,7 @@ pub struct AudioClip {
 /// ```json
 /// {
 ///   "characters": [{"name","profile","scene","guidance"}],
-///   "paragraphs": [{"index","lines":[{"speaker","content","tags"}]}],
+///   "paragraphs": [{"index","lines":[{"speaker","content","description"}]}],
 ///   "handoff": "..."
 /// }
 /// ```
@@ -145,14 +147,10 @@ pub fn script_schema() -> StructuredOutputFormat {
         "type": "object",
         "properties": {
             "speaker": {"type": "string", "description": "说话者角色名，旁白用\"旁白\""},
-            "content": {"type": "string", "description": "台词文本"},
-            "tags": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "情绪/场景标签，如\"怅然\"\"激昂\""
-            }
+            "content": {"type": "string", "description": "完整台词文本，需直接内联情绪/动作提示，例如：\"（紧张，深呼吸）呼……冷静，冷静。\""},
+            "description": {"type": "string", "description": "导演模式：从角色/场景/指导三维度刻画当前台词的演绎方式（100-300字）"}
         },
-        "required": ["speaker", "content", "tags"],
+        "required": ["speaker", "content", "description"],
         "additionalProperties": false
     });
 
