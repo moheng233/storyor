@@ -1,13 +1,21 @@
 # storyor 开发状态
 
-## 当前阶段：项目架构搭建完成 ✅
+## 当前阶段：v2 交互式工作流 + Web UI 架构升级规划中 📋
 
-## 最新变更：OpenAI 兼容 `json_object` 输出模式 ✅
+## 最新变更：v2 计划已制定 ✅
 
-- [x] 大模型请求不再使用 `json_schema`
-- [x] 改为通过 `response_format = { type = "json_object" }` 请求 JSON 对象输出
-- [x] `segment.md` / `script.md` 提示词补强：只输出 JSON 对象，不要附加解释或 Markdown 代码块
-- [x] `backend = "OpenAI"` 改为在程序内走自定义 `OpenAICompatibleProvider`，底层固定请求 `/v1/chat/completions`
+- [x] `PLAN.md` 已更新为 v2 完整架构计划（四阶段交互式工作流 + axum + React）
+- [x] 决策确认：Rust axum 后端 + React SPA 前端、音色分离设计（voicedesign → voiceclone）、文件系统持久化、本地运行
+- [x] **前后端类型安全策略**：使用 `ts-rs`（`#[derive(TS)]` 自动导出 TS 类型定义）+ `axfetchum`（`api_routes!` 自动生成带类型的 TS API 客户端），Rust 为单一事实来源
+- [ ] Phase A：后端基础设施（server 模块 + 项目管理 + ts-rs/axfetchum 集成）
+- [ ] Phase B：流水线解耦 + 进度事件 + TTS 双模式改造
+- [ ] Phase C：REST API 端点实现
+- [ ] Phase D：React 前端开发
+- [ ] Phase E：配置扩展 + CLI 适配 + 构建整合
+
+---
+
+## v1 状态：项目架构搭建完成 ✅
 
 ## 最新人工验证：小样本真实调用（run4）
 

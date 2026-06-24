@@ -1,209 +1,437 @@
-# Plan: 小说评书朗读生成器 (storyor)
+# Plan v2: 小说评书朗读生成器 (storyor)
 
 ## TL;DR
-基于 `llm` crate 构建一个三阶段流水线：小模型逐章摘要 → 大模型切分剧情段并生成 JSON 剧本（含角色库+衔接话）→ TTS 模型按段落合成音频。支持断点续跑、分段音频输出与清单管理。
+
+在 v1（CLI 单次流水线验证通过）基础上，升级为 **四阶段交互式工作流 + Web UI**。
+- **Rust axum 后端** — REST API + SSE 进度推送
+- **React SPA 前端** — Vite + TypeScript + [shadcn/ui](https://ui.shadcn.com/) 组件库，阶段式操作界面
+- 四阶段独立可干预：预处理 → 剧本生成 → 音色设计 → 音频合成
+- 音色分离设计：`voicedesign` 先行生成参考音频 → 用户确认 → `voiceclone` 精准复刻
+
+## 架构总览
+
+```
+┌──────────────┐     HTTP/SSE      ┌──────────────┐
+│  React SPA   │ ◄──────────────►  │  axum server │
+│  (Vite+TS)   │    REST API       │  (Rust)      │
+│  :5173       │                   │  :3001       │
+└──────────────┘                   └──────┬───────┘
+          ▲                               │
+          │  ts-rs 生成 TS 类型            │
+          │  axfetchum 生成 TS API 客户端   │
+          │  (前后端类型复用，编译期校验)     │
+          └───────────────────────────────┘
+                                          │
+                          ┌───────────────┼───────────────┐
+                          │               │               │
+                    ┌─────▼─────┐  ┌─────▼─────┐  ┌─────▼─────┐
+                    │ 小模型     │  │ 大模型     │  │ TTS 模型  │
+                    │ (摘要)     │  │ (剧本)     │  │ (音色+合成)│
+                    └───────────┘  └───────────┘  └───────────┘
+```
+
+## 前后端类型安全策略（🔑 核心设计）
+
+前后端类型一致性和 API 契约校验是整个系统可靠性的基石。Rust 端作为**单一事实来源（Single Source of Truth）**，所有共享类型和 API 接口定义在 Rust 侧，通过以下两个 crate 自动生成前端代码：
+
+### ts-rs：Rust 类型 → TypeScript 类型
+
+使用 `#[derive(TS)]` + `#[ts(export)]` 宏，在 `cargo test` 时自动将 Rust 数据结构导出为 TypeScript 类型定义文件。
+
+```rust
+// src/script.rs
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]  // 自动导出到 bindings/ 目录
+pub struct Script {
+    pub segment_index: usize,
+    pub characters: CharacterLibrary,
+    pub paragraphs: Vec<Paragraph>,
+    pub handoff: String,
+}
+```
+
+导出产物示例：
+```typescript
+// frontend/src/bindings/Script.ts
+export interface Script {
+    segment_index: number;
+    characters: CharacterLibrary;
+    paragraphs: Array<Paragraph>;
+    handoff: string;
+}
+```
+
+### axfetchum：Axum 路由 → TypeScript API 客户端
+
+使用 `api_routes!` 宏声明式定义路由元数据（路径、HTTP 方法、请求体/响应体类型），自动生成带完整类型的 TypeScript fetch 封装函数。
+
+```rust
+// src/server/routes/scripts.rs
+use axfetchum::{api_routes, RouteCollection};
+
+fn script_routes() -> RouteCollection {
+    api_routes! {
+        @group scripts
+
+        getScripts:   GET  "/projects/{id}/scripts"
+            -> Vec<ScriptMeta>;
+        getScript:    GET  "/projects/{id}/scripts/{seg_idx}"
+            -> Script;
+        updateScript: PUT  "/projects/{id}/scripts/{seg_idx}"
+            body: Script -> Script;
+    }
+}
+```
+
+生成的 TypeScript 客户端：
+```typescript
+// frontend/src/bindings/api.ts
+import type { Script, ScriptMeta } from "./Script";
+
+export function getScripts(id: string): Promise<Array<ScriptMeta>> { /* ... */ }
+export function getScript(id: string, segIdx: number): Promise<Script> { /* ... */ }
+export function updateScript(id: string, segIdx: number, body: Script): Promise<Script> { /* ... */ }
+```
+
+### 工作流
+
+1. **Rust 端定义**：用 `#[derive(TS)]` 标注所有前后端共享的数据结构，用 `api_routes!` 声明所有 API 端点
+2. **自动生成**：`cargo test`（或独立 `export_bindings` 步骤）触发 ts-rs 导出 TS 类型定义 + axfetchum 生成 TS API 客户端
+3. **前端消费**：前端直接 `import { Script } from '@/bindings/Script'` 和 `import { getScript } from '@/bindings/api'`，享受完整类型推导
+4. **CI 校验**：axfetchum 的 `check()` 函数可在 CI 中检测生成代码是否过期，防止前后端类型漂移
+
+## 四阶段交互流程
+
+| 阶段 | 做什么 | 用户可修改 |
+|------|--------|-----------|
+| **1. 预处理** | 章节切分 → 逐章摘要 → 剧情段划分 | 章节边界、摘要文本、段范围 |
+| **2. 剧本生成** | 逐段生成剧本（角色库+台词+衔接话） | 三种修改方式：附加提示词重新生成 / 对话式修改 / 直接编辑 |
+| **3. 音色设计** | `voicedesign` 按 guidance 生成参考音频 | guidance 文本、重新生成、确认音色 |
+| **4. 音频合成** | `voiceclone` + 已确认音色，**按剧情段**逐段合成最终音频 | 单段重新合成、单句重新合成、进度监控 |
+
+### 阶段 2 详解：剧本段的三种修改模式
+
+每个剧情段支持独立操作，用户可对任一段反复打磨：
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| **① 附加提示词重新生成** | 在原始 prompt 基础上追加用户自定义指令（如"让岑清霜更傲娇一点"），大模型根据原文 + 已有角色库 + 用户提示词重新生成该段完整剧本 | 对整体风格/角色性格不满意，需要大改 |
+| **② 对话式修改** | 以当前剧本为上下文，打开一个对话面板。用户用自然语言提出修改意见（如"把第三段对话改得更温柔些"），大模型理解上下文后返回修改后的剧本 | 局部调整、不确定具体怎么改，信任模型判断 |
+| **③ 直接编辑** | 纯前端文本编辑器，直接修改 JSON 中的台词、角色档案、段落分组、handoff。支持行内编辑和原始 JSON 编辑两种视图 | 精细微调、修正明显错误、手动补全 |
+
+三种模式共享同一个剧本编辑器界面，用户可随时切换。每次修改后自动落盘，角色库随之更新。
 
 ## 用户决策
-- 章节切分：正则匹配章节标题
-- TTS 音色：chat 接口传消息（assistant=角色音色设定，user=台词文本），音频以 base64 形式返回在 `choices[0].message.audio.data`
-- 角色一致性：独立角色库，顺序生成，每段携带「上段衔接话 + 上段角色库」
-- 音频输出：分段音频 + manifest 清单 + 断点续跑
-- 分段策略：由大模型在生成剧本时同时输出段落分组（而非后处理）
-- 提示词模板：外置于配置文件中（`prompts/` 目录）
 
-## 库能力要点 (llm 1.3.8)
-- `LLMBuilder::new().backend(LLMBackend).api_key().base_url().model().system().schema(StructuredOutputFormat).voice().memory().resilient().build()` -> `Box<dyn LLMProvider>`
-- `LLMBackend`: OpenAI/Anthropic/Ollama/DeepSeek/XAI/Google/Groq/ElevenLabs/Mistral/OpenRouter/HuggingFace 等，实现 `FromStr`
-- `ChatProvider::chat(&[ChatMessage])` -> `Box<dyn ChatResponse>`; `ChatResponse::text()` -> `Option<String>`
-- `TextToSpeechProvider::speech(&str)` -> `Vec<u8>`
-- `ChatMessage::user()`/`assistant()` -> `ChatMessageBuilder`
-- `StructuredOutputFormat { name, description, schema: Option<Value>, strict: Option<bool> }` 用于 JSON 结构化输出
-- `LLMBuilder::validator()` + `validator_attempts()` 可校验输出并重试
-- `LLMBuilder::resilient()` + `resilient_attempts()` + `resilient_backoff()` 自动重试退避
-- `LLMBuilder::extra_body(Serialize)` 可注入 provider 特有参数
+- **UI 方案**：Rust axum 后端 + React SPA 前端（前后端分离）
+- **音色 API**：`voicedesign` 返回参考音频样本 → `voiceclone` 通过该音频做 few-shot 克隆
+- **数据持久化**：延续文件系统方案（JSON + 目录），每个项目独立目录
+- **部署方式**：仅本地运行，无需鉴权/多用户
+- 其余继承 v1 决策（章节正则、角色库顺序传递、断点续跑、提示词外置）
 
-## 数据结构设计
-- `Chapter { index, title, content }`
-- `ChapterSummary { chapter_index, summary }`
-- `PlotSegment { index, chapter_range, summary }`
-- `CharacterProfile { name, profile, scene, guidance }` — guidance 即 TTS 音色设定
-- `CharacterLibrary { characters: HashMap<String, CharacterProfile> }`
-- `ScriptLine { speaker, content, tags: Vec<String> }`
-- `Paragraph { index, lines: Vec<ScriptLine> }` — 一组连续台词，作为一次 TTS 调用的单位
-- `Script { segment_index, characters: CharacterLibrary, paragraphs: Vec<Paragraph>, handoff: String }`
-- `AudioClip { segment_index, paragraph_index, audio_path, duration_secs: Option<f64> }`
+## 项目产物目录结构（每个项目独立）
 
-## 剧本 JSON 输出格式 (StructuredOutputFormat schema)
-由大模型在生成剧本时**同时输出段落分组**（`paragraphs`），不再后处理切分。
+在 `workspace_dir/` 下按项目名分目录。每个项目目录延续 v1 `output/` 格式，新增 `voices/` 子目录。
+
+```
+<workspace_dir>/
+└── <project_name>/
+    ├── project.json                # 项目元信息（id/name/novel_path/phase/config）
+    ├── chapters.json               # 章节切分结果
+    ├── summaries.json              # 章节摘要
+    ├── segments.json               # 剧情段切分
+    ├── characters/
+    │   └── final.json              # 最终累积角色库
+    ├── voices/
+    │   ├── 角色A/
+    │   │   ├── ref_audio.mp3       # voicedesign 生成的参考音频
+    │   │   └── voice.json          # { guidance, confirmed: bool, created_at }
+    │   └── 角色B/
+    │       └── ...
+    ├── scripts/
+    │   ├── segment_0001.json
+    │   ├── segment_0001.handoff.txt
+    │   └── ...
+    ├── audio/
+    │   ├── segment_0001/
+    │   │   ├── p0000_l0000.mp3
+    │   │   ├── segment.wav
+    │   │   └── ...
+    │   └── ...
+    ├── manifest.json
+    └── checkpoint.json
+```
+
+### checkpoint.json（v2 扩展）
+
 ```json
 {
-  "characters": [{"name","profile","scene","guidance"}],
-  "paragraphs": [
-    {
-      "index": 0,
-      "lines": [{"speaker":"旁白","content":"...","tags":[]}, {"speaker":"角色A","content":"...","tags":["怅然"]}]
-    }
-  ],
-  "handoff": "传递给下一段的剧情衔接说明"
-}
-```
-
-## TTS 多轮对话格式 (每段落一次调用)
-对每个 `Paragraph`（含多句台词），构造多轮 chat 消息：
-```json
-// 请求消息（由 tts/client.rs 构造）
-messages = [
-  ChatMessage::assistant().content(角色1.guidance),
-  ChatMessage::user().content(台词1),
-  ChatMessage::assistant().content(角色2.guidance),
-  ChatMessage::user().content(台词2),
-  ...
-]
-```
-
-### TTS 响应格式（实际 API 返回）
-音频以 **base64** 形式嵌套在标准 chat completion 的扩展字段中，不走 `ChatResponse::text()`：
-```json
-{
-  "choices": [{
-    "message": {
-      "content": "",
-      "role": "assistant",
-      "audio": {
-        "data": "<base64 encoded audio>",
-        "id": "...",
-        "expires_at": null,
-        "transcript": null
-      }
-    }
-  }]
-}
-```
-
-### 音频提取策略
-`llm` crate 的 `ChatResponse` trait 仅暴露 `text()` 和 `tool_calls()`，不包含 `audio` 扩展字段。
-因此 `TtsClient` 需直接反序列化原始响应 JSON 提取 `choices[0].message.audio.data`，不走 trait 抽象。
-实现为 `AudioExtractor::Base64` 策略（后续可扩展其他格式）。
-
-## 模块结构
-```
-src/
-  main.rs           CLI 入口 (clap)
-  config.rs         三模型配置 + 全局参数
-  error.rs          错误类型 (thiserror)
-  novel/chapter.rs  正则章节切分
-  pipeline/
-    mod.rs          流水线编排 + 断点续跑
-    summary.rs      章节摘要 (小模型, 并行)
-    segment.rs      剧情段切分 (大模型)
-    script.rs       剧本生成 (大模型, 顺序, JSON)
-  character.rs      角色库管理 + 合并更新
-  script.rs         剧本数据结构 + JSON schema 定义
-  prompts/             提示词模板目录（外置配置）
-    story_teller.md    说书人风格系统提示词
-    summary.md         章节摘要提示词
-    segment.md         剧情段切分提示词
-  tts/
-    client.rs          chat 接口 TTS 封装 + 音频提取策略
-  audio.rs          音频落盘 + manifest 生成
-  checkpoint.rs     产物落盘 + 续跑检查
-```
-
-## 产物落盘目录结构（固定）
-根目录 `<output_dir>/`（默认 `./output`，CLI `--output` 配置）。所有中间产物与最终音频均落盘于此，命名用零填充（4 位）保证排序。`checkpoint.json` 驱动断点续跑。
-
-```
-<output_dir>/
-├── chapters.json                 # 章节切分结果 Vec<Chapter>（index/title/content）
-├── summaries.json                # 章节摘要 Vec<ChapterSummary>
-├── segments.json                 # 剧情段切分 Vec<PlotSegment>
-├── characters/
-│   └── final.json                # 最终累积角色库 CharacterLibrary
-├── scripts/
-│   ├── segment_0001.json         # 完整剧本 Script（characters/lines/handoff）
-│   ├── segment_0001.handoff.txt  # 衔接话纯文本（便于人工审阅衔接逻辑）
-│   ├── segment_0002.json
-│   └── segment_0002.handoff.txt
-├── audio/
-│   ├── segment_0001/
-│   │   ├── paragraph_0001.mp3    # 单段落音频（一段多轮对话合成结果）
-│   │   └── paragraph_0002.mp3
-│   └── segment_0002/
-│       └── paragraph_0001.mp3
-├── manifest.json                 # 音频清单：所有 AudioClip 汇总（路径/剧情段/角色/时长）
-└── checkpoint.json                # 断点续跑状态机
-```
-
-### checkpoint.json 结构
-```json
-{
-  "novel_hash": "<sha256 of input novel>",
-  "config_hash": "<hash of relevant config>",
+  "novel_hash": "<sha256>",
+  "config_hash": "<sha256>",
   "stages": {
-    "chapters":  "done",
-    "summaries": "done",
-    "segments":  "done",
-    "scripts":   { "completed": [0, 1], "total": 5 },
-    "audio":     { "completed": [0],    "total": 5 }
+    "preprocess": "done",
+    "scripts":    { "completed": [0, 1], "total": 5 },
+    "voices":     { "completed": ["岑清霜", "旁白"], "total": 8 },
+    "audio":      { "completed": [0],    "total": 5 }
   }
 }
 ```
-- `novel_hash`/`config_hash` 变更时提示全量重跑（旧产物失效）
-- 阶段级（chapters/summaries/segments）整体完成标记；段级（scripts/audio）记录已完成索引集合，支持段粒度续跑
 
-## Steps
+## 实施步骤
 
-### Phase 1: 基础设施
-1. 定义 `config.rs`：`ModelConfig{backend,api_key,base_url,model}` ×3（small/large/tts）+ 全局参数（正则、并发数、输出目录、段落长度上限）。用 clap derive 暴露 CLI。
-2. 定义 `error.rs`：用 thiserror 统一 `StoryorError`（IO/LLM/Parse/Checkpoint 变体）。
-3. 定义 `script.rs`：上述数据结构 + `serde` 序列化/反序列化 + `StructuredOutputFormat` schema 构造函数。
+### Phase A：后端基础设施
 
-### Phase 2: 小说解析与章节摘要
-4. `novel/chapter.rs`：正则切分章节，返回 `Vec<Chapter>`。正则可配置（默认 `第.{1,6}章` / `Chapter \d+`）。结果落盘 `<output>/chapters.json`。
-5. `pipeline/summary.rs`：用小模型对每章生成 1-2 句摘要。`buffer_unordered` 并发（受 `max_concurrency` 限制）。结果落盘 `<output>/summaries.json`。
+**A1. 添加依赖** (`Cargo.toml`)
+- 新增：`axum`, `tower`, `tower-http` (cors/serve static), `uuid`, `sha2` (已有)
+- **新增前后端类型桥接**：`ts-rs` (v12, `#[derive(TS)]` 导出 TS 类型), `axfetchum` (v0.1, `api_routes!` 生成 TS API 客户端)
+- 可能新增 `[[bin]]` 或保持单 binary 多子命令
 
-### Phase 3: 剧情段切分与剧本生成
-6. `pipeline/segment.rs`：把所有章节摘要交给大模型，输出 `Vec<PlotSegment>`（含起止章节、剧情概述）。用 `StructuredOutputFormat` 保证 JSON。落盘 `<output>/segments.json`。
-7. `pipeline/script.rs`：顺序遍历剧情段。每段构造 prompt = 系统提示（说书人风格模板）+ 上段 handoff + 当前角色库 + 本段原文。用 `schema()` + `validator()` 强制 JSON 输出并校验。解析为 `Script`，更新角色库（合并新增/更新已有），落盘 `<output>/scripts/segment_{i:04}.json` + `<output>/scripts/segment_{i:04}.handoff.txt`，并每段后刷新 `<output>/characters/final.json`。
-8. `character.rs`：`CharacterLibrary::merge(new_chars)` 合并策略——新角色加入、已有角色按段更新（保留最新 guidance）。
+**A2. 创建 server 模块**
+- `src/server/mod.rs` — `run_server(config)` 启动 axum，监听 `127.0.0.1:3001`
+- `src/server/state.rs` — `AppState`：`ProjectManager` + `Config` + 进度 `broadcast::Sender`
+- `src/server/routes/mod.rs` — 路由注册，同时通过 `axfetchum::api_routes!` 声明每个路由的元数据（路径/方法/请求体/响应体类型），自动生成 TS API 客户端
+- `src/server/types.rs` — 集中定义所有 API 请求/响应类型，全部标注 `#[derive(TS, Serialize, Deserialize)]`
+- 生产模式：axum serve `frontend/dist/` 静态文件 + SPA fallback
 
-### Phase 4: TTS 合成与音频输出
-9. `tts/client.rs`：`TtsClient` 封装。`synthesize_paragraph(paragraph, library)` 对每个 `Paragraph` 构造多轮 chat 消息 `[assistant(guidance), user(text), ...]`。**不走 `ChatProvider::chat()` 的 trait 抽象**——直接调用底层 HTTP 客户端并反序列化原始 JSON，提取 `choices[0].message.audio.data` 做 base64 解码为 `Vec<u8>`。音频格式由 CLI `--audio-format` 指定（默认 mp3）。
-10. `audio.rs`：音频落盘 `<output>/audio/segment_{i:04}/paragraph_{j:04}.mp3`，记录 `AudioClip`。
-11. 生成 `<output>/manifest.json`：列出所有段落音频路径、对应剧情段、角色、时长（如可获取）。
+**A3. 项目管理模块**
+- `src/project.rs` — `ProjectManager`：
+  - `workspace_dir` 下按项目名分目录
+  - `ProjectMeta { id, name, novel_path, created_at, current_phase, config }` 存 `project.json`
+  - `list_projects()`, `create_project()`, `get_project()`, `delete_project()`
 
-### Phase 5: 编排与断点续跑
-12. `checkpoint.rs`：维护 `<output>/checkpoint.json`（见目录结构小节）。启动时读取，校验 `novel_hash`/`config_hash`，按阶段+段索引跳过已完成产物（chapters→summaries→segments→scripts→audio）。
-13. `pipeline/mod.rs`：`Pipeline::run()` 串联全流程，每阶段/每段完成后写 checkpoint。支持 `--resume` 从最近断点继续，`--force` 忽略 checkpoint 全量重跑。
-14. `main.rs`：解析 CLI → 构建 3 个 `Box<dyn LLMProvider>`（小/大/TTS，各自 `resilient()` + `validator()`）→ 运行 pipeline。
+### Phase B：流水线解耦与进度事件
 
-## Relevant files
-- `Cargo.toml` — 已有 llm/clap/tokio/serde/serde_json/thiserror/tracing，可能需加 `regex`（章节切分）、`futures`（并发流，或用 tokio Stream）
-- `src/main.rs` — 当前仅 hello world，将改为 CLI 入口
-- `llm::builder::LLMBuilder` — 构建 provider，关键方法 `backend/api_key/base_url/model/system/schema/voice/resilient/validator/extra_body/build`
-- `llm::chat::{ChatMessage, ChatProvider, ChatResponse, StructuredOutputFormat}` — 对话与结构化输出
-- `llm::tts::TextToSpeechProvider` — `speech(&str)->Vec<u8>`（TTS 走 chat 接口时可能不用此 trait，而用 ChatProvider）
+**B1. 流水线阶段独立化**
+- 将 `src/pipeline/mod.rs` 中 `Pipeline::run()` 的串联逻辑拆分为独立可调用阶段函数
+- 每个阶段函数接受 `project_id`，自行读取/写入项目目录下的产物文件
+- 阶段间通过文件系统传递数据
 
-## Verification
-1. `cargo build` 编译通过，`cargo clippy` 无警告
-2. 单元测试：`novel/chapter.rs` 正则切分（含边界：无章节标题、单章、空内容）
-3. 单元测试：`character.rs` 角色库合并（新增、更新、冲突处理）
-4. 集成测试：用 mock LLM provider（或录制响应）跑通 summary→segment→script 三阶段，验证 JSON 解析（含 `paragraphs` 结构）
-5. 手动验证：用真实小模型跑 1-3 章短篇，检查摘要质量、剧情段切分合理性、剧本格式、角色库一致性
-6. 手动验证：用真实 TTS 模型跑单段剧本，检查 base64 音频提取与输出文件可播放
-7. 断点续跑验证：中途 Ctrl-C 后重启，确认跳过已完成阶段
+**B2. 进度事件系统**
+- `src/server/events.rs` — `ProgressEvent` 枚举（`StageStarted/StageProgress/StageCompleted/StageError`）
+- `AppState` 持有 `broadcast::Sender<ProgressEvent>`，各阶段函数通过它推送进度
+- SSE endpoint `GET /api/projects/:id/events`
+
+**B3. TTS 客户端双模式改造**
+- `src/tts/client.rs` 新增两种方法：
+  - `design_voice(guidance: &str) -> Result<Vec<u8>>` — 调 `voicedesign` 模型，返回参考音频
+  - `clone_voice(reference_audio: &[u8], text: &str) -> Result<Vec<u8>>` — 调 `voiceclone` 模型
+- 配置文件新增 `[voice_design_model]` 和 `[voice_clone_model]` 两个 `ModelConfig`
+
+### Phase C：API 端点
+
+**C1. 项目管理** (`src/server/routes/projects.rs`)
+- `GET /api/projects` — 项目列表
+- `POST /api/projects` — 创建项目（multipart: novel file + config）
+- `GET /api/projects/:id` — 项目详情
+- `DELETE /api/projects/:id` — 删除项目
+
+**C2. 预处理** (`src/server/routes/preprocess.rs`)
+- `POST /api/projects/:id/preprocess` — 启动预处理（异步，SSE 报告进度）
+- `GET /api/projects/:id/chapters` — 获取章节列表
+- `PUT /api/projects/:id/chapters/:idx` — 修改章节
+- `GET /api/projects/:id/summaries` — 获取摘要列表
+- `PUT /api/projects/:id/summaries/:idx` — 修改摘要
+- `GET /api/projects/:id/segments` — 获取剧情段
+- `PUT /api/projects/:id/segments/:idx` — 修改剧情段
+
+**C3. 剧本** (`src/server/routes/scripts.rs`)
+- `POST /api/projects/:id/scripts/generate` — 生成全部剧本（异步）
+- `POST /api/projects/:id/scripts/:segIdx/regenerate` — **单段重新生成**（body: `{ extra_prompt: string }`；将该段的额外提示词追加到原始 prompt，大模型生成新剧本覆盖旧产物，角色库随之更新）
+- `POST /api/projects/:id/scripts/:segIdx/chat` — **对话式修改**（body: `{ user_message: string }`；以当前剧本为上下文，大模型根据用户消息返回修改后的该段剧本）
+- `GET /api/projects/:id/scripts` — 获取剧本元信息列表
+- `GET /api/projects/:id/scripts/:segIdx` — 获取单段完整剧本
+- `PUT /api/projects/:id/scripts/:segIdx` — **直接编辑保存**（前端修改后提交完整 Script JSON，服务端校验并落盘）
+- `GET /api/projects/:id/characters` — 获取角色库
+- `PUT /api/projects/:id/characters/:name` — 修改角色
+
+**C4. 音色设计** (`src/server/routes/voices.rs`)
+- `GET /api/projects/:id/voices` — 获取所有角色音色状态
+- `POST /api/projects/:id/voices/:charName/design` — 生成参考音频（异步）
+- `GET /api/projects/:id/voices/:charName/sample` — 获取参考音频文件
+- `PUT /api/projects/:id/voices/:charName/guidance` — 修改 guidance 并重新设计
+- `POST /api/projects/:id/voices/:charName/confirm` — 确认音色
+
+**C5. 音频合成** (`src/server/routes/audio.rs`)
+- `POST /api/projects/:id/audio/synthesize` — 合成全部未完成段落的音频（异步）
+- `POST /api/projects/:id/audio/segments/:segIdx/synthesize` — **单段合成**：仅合成指定剧情段的全部台词（异步，支持 `extra_prompt` 注入合成参数）
+- `GET /api/projects/:id/audio/status` — 合成进度（按段粒度展示：哪些段已完成、当前正在合成哪段哪句）
+- `GET /api/projects/:id/audio/segments/:segIdx/paragraphs/:paraIdx` — 获取段落音频（单次 TTS 调用产物）
+- `GET /api/projects/:id/audio/segments/:segIdx/segment.wav` — 获取合并音频
+- `GET /api/projects/:id/manifest` — 获取音频清单
+
+**C6. SSE 进度端点**
+- `GET /api/projects/:id/events` — Server-Sent Events 推送所有阶段进度
+
+### Phase D：React 前端
+
+**D1. 项目初始化**
+- `frontend/` 目录，Vite + React + TypeScript
+- **UI 组件库**：[shadcn/ui](https://ui.shadcn.com/)（基于 Radix UI + Tailwind CSS），提供 Button、Card、Dialog、Tabs、Textarea、Slider、Badge、Toast、Sheet 等开箱即用的无障碍组件
+- 样式：Tailwind CSS（shadcn/ui 默认依赖）
+- 依赖：`react-router-dom`, `@tanstack/react-query`, `lucide-react`（shadcn/ui 默认图标库）
+- 开发代理：`/api` → `localhost:3001`
+- **类型导入**：前端直接从 `frontend/src/bindings/` 导入 ts-rs 生成的类型定义 + axfetchum 生成的 API 客户端，零手写 API 类型
+
+**D2. 页面与路由**
+| 路由 | 页面 | 核心功能 |
+|------|------|----------|
+| `/` | 项目列表 | 项目卡片、新建项目对话框（上传小说+配置） |
+| `/project/:id` | 项目仪表盘 | 四阶段 Stepper、当前阶段状态、快捷操作按钮 |
+| `/project/:id/preprocess` | 预处理 | 章节列表编辑、摘要编辑、段时间轴（可拖拽调整范围） |
+| `/project/:id/scripts` | 剧本 | 段列表 + 剧本编辑器（三种模式切换）+ 角色库面板、Handoff 编辑 |
+| `/project/:id/voices` | 音色设计 | 角色卡片网格、guidance 编辑器、音频播放器、确认按钮 |
+| `/project/:id/audio` | 音频合成 | 段列表（每段可折叠展开段落进度），逐句播放测试，**支持按段独立合成/重新合成** |
+
+**D3. 核心组件**（基于 shadcn/ui）
+- `PhaseStepper` — 四阶段步骤指示器（基于 `Tabs` / `Stepper` 自定义）
+- `ChapterEditor` — 章节列表 + 行内编辑（`Table` + `Input`）
+- `SegmentTimeline` — 剧情段时间轴（可拖拽调整范围，`Slider` + `Card`）
+- `ScriptEditor` — 剧本编辑器（段落折叠 `Collapsible`、台词行内编辑 `Textarea`、原始 JSON 编辑双视图）
+- `RegeneratePanel` — 单段重新生成面板（额外提示词 `Textarea` + `Button` + 进度 `Progress`）
+- `ChatPanel` — 对话式修改面板（聊天气泡界面，`ScrollArea` + `Input`，用户自然语言输入）
+- `CharacterCard` — 角色卡片（`Card` + `Badge` 状态标签）
+- `VoiceDesigner` — guidance 文本框 + 音频播放器 + `Button` 操作组
+- `AudioProgressBar` — 合成进度（`Progress` + `Table` 段/段落折叠列表，逐句播放按钮）
+- `useEventStream` — SSE 事件订阅 hook
+
+### Phase E：配置与构建整合
+
+**E1. 配置扩展** (`storyor.toml`)
+```toml
+# 新增
+[voice_design_model]
+backend = "OpenAI"
+api_key = "..."
+base_url = "..."
+model = "mimo-v2.5-tts-voicedesign"
+
+[voice_clone_model]
+backend = "OpenAI"
+api_key = "..."
+base_url = "..."
+model = "mimo-v2.5-tts-voiceclone"
+
+[server]
+host = "127.0.0.1"
+port = 3001
+
+[workspace]
+dir = "./workspace"
+```
+
+**E2. CLI 适配**
+- `storyor server` — 启动 Web UI 服务器
+- `storyor pipeline --input <file>` — 保留原 CLI 批处理模式
+
+**E3. 构建脚本**
+- 开发：`cargo run -- server` + `cd frontend && npm run dev` 并行
+- 生产：`cd frontend && npm run build` → `cargo build --release`（axum serve 静态文件）
+
+## 模块结构（v2 总览）
+
+```
+src/
+  main.rs              CLI 入口（server / pipeline 子命令）
+  config.rs            配置扩展（voice_design/clone/server/workspace）
+  project.rs           项目管理 CRUD
+  error.rs             错误类型（新增 Server/Project 变体）
+  novel/chapter.rs     章节切分（复用 v1）
+  pipeline/
+    mod.rs             流水线编排 → 拆分为独立阶段函数
+    summary.rs         章节摘要（复用核心逻辑）
+    segment.rs         剧情段切分（复用核心逻辑）
+    script.rs          剧本生成（支持单段独立生成）
+  server/
+    mod.rs             axum 服务启动
+    state.rs           AppState（项目管理器 + 进度广播）
+    types.rs           API 请求/响应类型（#[derive(TS)] 自动导出 TS 类型）
+    events.rs          进度事件定义 + SSE 辅助
+    routes/
+      mod.rs           路由注册 + axfetchum::api_routes! 声明
+      projects.rs      项目管理端点
+      preprocess.rs    预处理端点
+      scripts.rs       剧本端点
+      voices.rs        音色设计端点
+      audio.rs         音频合成端点
+  character.rs         角色库管理（复用 v1，新增 #[derive(TS)]）
+  script.rs            数据结构（新增 #[derive(TS)] 导出 TS 类型）
+  prompts.rs           提示词加载（复用 v1）
+  tts/
+    mod.rs
+    client.rs          VoiceDesign + VoiceClone 双模式
+  audio.rs             音频落盘合并（复用核心逻辑）
+  checkpoint.rs        断点续跑（适配新阶段定义）
+
+prompts/
+  story_teller.md      说书人风格系统提示词
+  summary.md           章节摘要提示词
+  segment.md           剧情段切分提示词
+  script.md            剧本生成提示词
+
+frontend/
+  src/
+    bindings/          ts-rs 生成的 TS 类型 + axfetchum 生成的 API 客户端
+    pages/             项目列表 / 仪表盘 / 预处理 / 剧本 / 音色 / 音频
+    components/        共享组件
+    hooks/             useEventStream / useApi
+    api/               API client 封装（基于 axfetchum 生成代码）
+```
+
+## 关键文件变更清单
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `Cargo.toml` | 修改 | 新增 axum/tower-http/uuid/ts-rs/axfetchum |
+| `src/main.rs` | 修改 | 新增 `server` 子命令 |
+| `src/config.rs` | 修改 | 新增 voice_design/clone/server/workspace 配置 |
+| `src/error.rs` | 修改 | 新增 Server/Project 错误变体 |
+| `src/tts/client.rs` | 修改 | VoiceDesign + VoiceClone 双模式 |
+| `src/pipeline/mod.rs` | 修改 | 拆分为独立阶段函数 |
+| `src/pipeline/script.rs` | 修改 | 支持单段独立生成 + 单段重新生成（extra_prompt）+ 对话式修改（chat context） |
+| `src/checkpoint.rs` | 修改 | 适配新阶段定义（preprocess/scripts/voices/audio） |
+| `src/script.rs` | 修改 | 新增 VoiceRef 字段，添加 `#[derive(TS)]` |
+| `src/character.rs` | 修改 | 添加 `#[derive(TS)]` 导出角色类型 |
+| `src/server/mod.rs` | **新增** | axum 服务启动 |
+| `src/server/state.rs` | **新增** | 共享状态 |
+| `src/server/types.rs` | **新增** | API 请求/响应类型（`#[derive(TS)]`） |
+| `src/server/events.rs` | **新增** | 进度事件 |
+| `src/server/routes/*.rs` | **新增** | 5 组 API 端点 + `api_routes!` 声明 |
+| `src/project.rs` | **新增** | 项目管理 CRUD |
+| `frontend/` | **新增** | React 项目（shadcn/ui + Tailwind CSS + TypeScript）+ bindings/ 自动生成的 TS 代码 |
 
 ## Decisions
-- TTS 走 chat 接口而非 `speech()`：因用户的 TTS 模型以 chat 多轮消息接收音色设定+台词，音频以 base64 返回在 `choices[0].message.audio.data`
-- TTS 音频提取绕过 `ChatResponse` trait，直接反序列化原始 JSON 取 `audio.data` 字段
-- 角色库顺序传递：每段生成时注入「上段 handoff + 当前角色库」，模型输出更新后的角色库 + 新 handoff，天然保持一致性
-- 剧本生成用 `StructuredOutputFormat` + `validator()` 双保险保证 JSON 可解析
-- 大模型在生成剧本时同时输出段落分组（`paragraphs`），不再后处理。prompt 中需指导按情绪/场景转变划分
-- 提示词模板外置于 `prompts/` 目录，便于迭代调优
-- 中间产物全部落盘 JSON + checkpoint.json，支持段粒度断点续跑
+
+- **音频合成分段独立**：与剧本段一一对应，每段可独立触发合成，不依赖其他段。checkpoint 按段粒度记录音频完成状态，支持单段重新合成（覆盖旧产物）
+- **前后端类型安全**：Rust 为单一事实来源，`ts-rs`（`#[derive(TS)]`）自动导出 TS 类型定义，`axfetchum`（`api_routes!`）自动生成带类型的 TS API 客户端。前端代码零手写 API 类型，编译期保证前后端契约一致
+- **音色设计工作流**：`voicedesign` 返回音频样本 → 用户试听 → 修改 guidance 重新生成 → 确认后锁定 → `voiceclone` 以该音频为参考做 few-shot 克隆
+- **TTS 双模式**：`TtsClient` 设计两个独立方法（`design_voice` / `clone_voice`），具体 HTTP 请求格式通过 `ModelConfig` 中的 `extra_body` 扩展
+- **前后端分离**：开发时 Vite dev server (5173) 代理 API → axum (3001)；生产构建 axum serve 静态文件
+- **进度推送**：SSE（Server-Sent Events）单向推送，`tokio::sync::broadcast` 实现
+- **数据持久化**：文件系统 JSON + 目录，每个项目独立 workspace 子目录，无需数据库
+- 其余继承 v1 决策
+
+## Verification
+
+1. `cargo build` 编译通过（server + pipeline 模式）
+2. `cargo test` 现有 24 测试保持通过 + ts-rs 导出 bindings 自动执行
+3. **类型一致性**：`cargo test` 后检查 `frontend/src/bindings/` 目录生成正确，`tsc --noEmit` 无类型错误
+4. **UI 组件**：shadcn/ui 组件正常渲染，Tailwind CSS 样式生效，深色/浅色主题切换正常
+4. 手动：`storyor server` → 浏览器 `localhost:3001` → 项目列表渲染
+5. 手动：创建项目 → 上传小说 → 预处理 → 编辑章节/摘要/段 → 确认
+6. 手动：剧本生成 → 编辑台词/角色 → 角色库正确累积更新
+7. 手动：音色设计 → guidance 生成参考音频 → 播放 → 修改 → 确认
+8. 手动：音频合成 → 单段合成 → voiceclone 逐句合成 → 播放 → 段合并 WAV → 另一段单独重新合成验证独立操作
+9. 手动：中途关闭浏览器 → 重启 server → checkpoint 续跑（段粒度音频续跑）
 
 ## Further Considerations
-1. ~~TTS 响应音频提取策略~~ → 已确定：base64 编码在 `choices[0].message.audio.data`，直接反序列化原始 JSON
-2. ~~段落分组粒度~~ → 已确定：由大模型在生成剧本时输出 `paragraphs`，不再后处理
-3. 大模型分段质量：需在剧本 prompt 中明确指导模型按"情绪/场景转变"划分段落，而非机械按角色切换。建议在 `prompts/story_teller.md` 中给出分段示例
-4. TTS 底层通信：`llm` crate 的 `ChatProvider` trait 无法暴露 `audio` 扩展字段，需绕过 trait 直接调用。需调研 `llm` crate 是否暴露底层 HTTP 客户端或需自行用 `reqwest` 构造请求
+
+1. **voicedesign / voiceclone API 细节待确认**：具体 HTTP 请求/响应格式需要在首次调试时确定，当前通过 `extra_body` 灵活适配
+2. **前端富文本编辑**：台词 content 含内联标签如 `（怅然）（深呼吸）`，剧本编辑器初期用纯文本框，后续可考虑可视化标签插入
+3. **异步任务生命周期**：剧本生成和音频合成耗时较长，需用 `tokio::spawn` 异步执行，通过 SSE 推送进度；任务不持久化到数据库，仅通过文件系统 checkpoint 判断完成情况
+4. **错误恢复**：每个阶段/段/句的失败应可重试，不影响已完成部分
+5. **ts-rs 与 axfetchum 集成**：
+   - 构建流程中增加 `cargo test`（触发 ts-rs 导出）和 axfetchum 生成的检查步骤
+   - CI 中用 `axfetchum::check()` 防止手动修改生成文件导致前后端类型漂移
+   - 前端 `package.json` 中添加 `generate:bindings` 脚本，一键运行 Rust 端的类型导出
+6. **对话式修改的上下文管理**：`POST /scripts/:segIdx/chat` 端点每次收到用户消息时，需构造完整的对话上下文（系统提示词 + 当前剧本完整 JSON + 之前的修改对话历史），大模型才能在充分理解现状的基础上给出精准修改。对话历史不需要持久化（每次会话独立），但当前剧本作为每次请求的必要上下文始终注入
+
