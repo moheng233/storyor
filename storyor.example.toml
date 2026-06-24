@@ -1,0 +1,31 @@
+# storyor 配置示例
+# 复制为 storyor.toml 并按需修改
+
+# 小模型配置（章节摘要，建议用快速便宜的模型）
+[small_model]
+backend = "DeepSeek"
+api_key = "your-api-key"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+
+# 大模型配置（剧情段切分 + 剧本生成，建议用强推理模型）
+[large_model]
+backend = "OpenAI"
+api_key = "your-api-key"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+
+# TTS 模型配置（音频合成，需支持 chat 接口返回 audio）
+[tts_model]
+backend = "OpenAI"
+api_key = "your-api-key"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-audio-preview"
+
+# 全局参数
+chapter_regex = "第[零一二三四五六七八九十百千0-9]{1,6}[章节回]"
+max_concurrency = 4
+output_dir = "./output"
+max_paragraph_lines = 20
+audio_format = "mp3"
+tts_timeout_secs = 120
