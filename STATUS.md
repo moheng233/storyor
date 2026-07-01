@@ -1,14 +1,24 @@
 # storyor 开发状态
 
-## 当前阶段：v2 交互式工作流 + Web UI 架构升级规划中 📋
+## 当前阶段：v2 交互式工作流 + Web UI 架构升级 — Phase A 完成 ✅
 
-## 最新变更：剧本格式重构 + v2 计划补充 ✅
+## 最新变更：Phase A 后端基础设施落地 ✅
 
-- [x] `PLAN.md` 新增 **剧本格式重构** 章节：Action 序列（`say`/`wait`/`play`）替代 `ScriptLine`
-- [x] 决策确认：预置音效库方案（找不到 fallback 静音）、停顿时长语义标签（short/medium/long）、保持两层嵌套（Script → Paragraph → Action）、play 为时间线事件点（非背景混音）
-- [x] 配置扩展：新增 `[timing]` 节（三种停顿时长映射）和 `[sounds]` 节（音效库目录路径）
-- [x] 关键文件变更清单更新：`src/script.rs` 标记为**重构**、`src/audio.rs` 标记为**重构**、新增 `src/sounds.rs`
-- [x] 产品目录结构更新：音频命名从 `p{i}_l{j}.mp3` 改为 `p{i}_a{j}.mp3`（action index），新增独属于 wait 的 `.sil.mp3`
+- [x] **依赖**：`Cargo.toml` 新增 `axum`/`tower`/`tower-http`/`uuid`/`axfetchum`(含 `axum` feature)/`ts-rs`(含 `chrono-impl` feature)
+- [x] **错误类型**：`src/error.rs` 为 `StoryorError` 实现 `axum::response::IntoResponse`，统一返回 `{"error": msg}` JSON（项目未找到→404，其余→500）
+- [x] **配置扩展**：`src/config.rs` 新增 `ServerConfig`(host/port)、`WorkspaceConfig`(dir)、`TimingConfig`、`SoundsConfig`；CLI 简化为单一 `server` 模式（移除 V1 pipeline 子命令）
+- [x] **项目管理**：`src/project.rs` — `ProjectManager` 实现按 `workspace_dir/<id>/` 分目录的 CRUD（list/create/get/delete），`ProjectMeta`/`ProjectListItem`/`ProjectPhase`/`CreateProjectRequest` 标注 `#[derive(TS)]` 自动导出 TS 类型
+- [x] **server 模块**：
+  - `src/server/mod.rs` — `run_server(config)` 启动 axum，`build_router` 组装路由 + CORS + 静态文件 fallback
+  - `src/server/state.rs` — `AppState`（config + ProjectManager）
+  - `src/server/types.rs` — `HealthResponse`/`ErrorResponse`（`#[derive(TS)]`）
+  - `src/server/routes/mod.rs` — **axfetchum `ApiRouter` builder 模式**（별 `api_routes!` 宏），一次定义同步产出真实 axum `Router` + `RouteCollection` 元数据；含 projects CRUD、健康检查、静态文件服务、绑定导出
+  - `src/server/events.rs` — 进度事件骨架（Phase B 填充）
+- [x] **前端 TS 绑定导出**：`tests/export_bindings.rs` 使用 `ts_rs::TS::export_all(&Config)` 显式导出类型定义 + `axfetchum::generate_to_file` 生成 API 客户端，产物落在 `frontend/src/bindings/`（`api.ts` + 各类型 `.ts`）
+- [x] **CLI 入口**：`src/main.rs` 重写为 `server` 子命令入口（V1 pipeline 不再保留）
+- [x] 编译通过、`cargo test --test export_bindings` 通过
+
+> 备注：PLAN.md 原文用 `api_routes!` 宏，按用户要求改用 `ApiRouter` builder（axfetchum 官方推荐 Option A），单一来源、零重复声明。
 
 ---
 
@@ -16,8 +26,8 @@
 
 - [x] `PLAN.md` 已更新为 v2 完整架构计划（四阶段交互式工作流 + axum + React）
 - [x] 决策确认：Rust axum 后端 + React SPA 前端、音色分离设计（voicedesign → voiceclone）、文件系统持久化、本地运行
-- [x] **前后端类型安全策略**：使用 `ts-rs`（`#[derive(TS)]` 自动导出 TS 类型定义）+ `axfetchum`（`api_routes!` 自动生成带类型的 TS API 客户端），Rust 为单一事实来源
-- [ ] Phase A：后端基础设施（server 模块 + 项目管理 + ts-rs/axfetchum 集成）
+- [x] **前后端类型安全策略**：使用 `ts-rs`（`#[derive(TS)]` + `TS::export_all` 显式导出 TS 类型定义）+ `axfetchum`（`ApiRouter` builder 一次产出 axum 路由与 TS API 客户端），Rust 为单一事实来源
+- [x] Phase A：后端基础设施（server 模块 + 项目管理 + ts-rs/axfetchum 集成）✅
 - [ ] Phase B：流水线解耦 + 进度事件 + TTS 双模式改造
 - [ ] Phase C：REST API 端点实现
 - [ ] Phase D：React 前端开发

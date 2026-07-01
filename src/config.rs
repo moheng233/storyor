@@ -53,13 +53,19 @@ pub struct AppConfig {
     pub large_model: ModelConfig,
     /// TTS 模型配置（音频合成）
     pub tts_model: ModelConfig,
+    /// 音色设计模型配置（voicedesign，生成参考音频）
+    #[serde(default)]
+    pub voice_design_model: Option<ModelConfig>,
+    /// 音色克隆模型配置（voiceclone，基于参考音频 few-shot 克隆）
+    #[serde(default)]
+    pub voice_clone_model: Option<ModelConfig>,
     /// 章节切分正则（默认匹配「第X章」）
     #[serde(default = "default_chapter_regex")]
     pub chapter_regex: String,
     /// 摘要并发数
     #[serde(default = "default_concurrency")]
     pub max_concurrency: usize,
-    /// 输出目录
+    /// 输出目录（CLI 批处理模式使用；server 模式忽略，改用 workspace）
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
     /// 段落长度上限（台词行数）
@@ -74,6 +80,137 @@ pub struct AppConfig {
     /// TTS 请求超时（秒）
     #[serde(default = "default_tts_timeout")]
     pub tts_timeout_secs: u64,
+    /// 服务器配置（Web UI 模式）
+    #[serde(default)]
+    pub server: ServerConfig,
+    /// 工作区配置（项目目录管理）
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+    /// 停顿时长映射（wait 动作）
+    #[serde(default)]
+    pub timing: TimingConfig,
+    /// 预置音效库配置
+    #[serde(default)]
+    pub sounds: SoundsConfig,
+}
+
+/// 服务器监听配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// 监听地址
+    #[serde(default = "default_server_host")]
+    pub host: String,
+    /// 监听端口
+    #[serde(default = "default_server_port")]
+    pub port: u16,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: default_server_host(),
+            port: default_server_port(),
+        }
+    }
+}
+
+/// 工作区配置（所有项目根目录）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// 工作区根目录，每个项目在其中按名称分子目录
+    #[serde(default = "default_workspace_dir")]
+    pub dir: PathBuf,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_workspace_dir(),
+        }
+    }
+}
+
+/// 停顿时长语义标签 → 实际秒数映射
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimingConfig {
+    /// 短停顿（逗号、换气）
+    #[serde(default = "default_short_pause")]
+    pub short_pause_secs: f64,
+    /// 中停顿（句间、场景微转）
+    #[serde(default = "default_medium_pause")]
+    pub medium_pause_secs: f64,
+    /// 长停顿（场景转换、悬念留白）
+    #[serde(default = "default_long_pause")]
+    pub long_pause_secs: f64,
+}
+
+impl Default for TimingConfig {
+    fn default() -> Self {
+        Self {
+            short_pause_secs: default_short_pause(),
+            medium_pause_secs: default_medium_pause(),
+            long_pause_secs: default_long_pause(),
+        }
+    }
+}
+
+impl TimingConfig {
+    /// 根据语义标签返回实际秒数；未知标签返回中停顿
+    pub fn secs_for(&self, duration: &str) -> f64 {
+        match duration {
+            "short" => self.short_pause_secs,
+            "medium" => self.medium_pause_secs,
+            "long" => self.long_pause_secs,
+            other => {
+                tracing::warn!("未知停顿标签 `{other}`，回退为 medium");
+                self.medium_pause_secs
+            }
+        }
+    }
+}
+
+/// 预置音效库配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoundsConfig {
+    /// 音效库目录路径（含 index.toml 与音频文件）
+    #[serde(default = "default_sounds_dir")]
+    pub dir: PathBuf,
+}
+
+impl Default for SoundsConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_sounds_dir(),
+        }
+    }
+}
+
+fn default_server_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_server_port() -> u16 {
+    3001
+}
+
+fn default_workspace_dir() -> PathBuf {
+    PathBuf::from("./workspace")
+}
+
+fn default_sounds_dir() -> PathBuf {
+    PathBuf::from("./assets/sounds")
+}
+
+fn default_short_pause() -> f64 {
+    0.5
+}
+
+fn default_medium_pause() -> f64 {
+    1.5
+}
+
+fn default_long_pause() -> f64 {
+    3.0
 }
 
 fn default_chapter_regex() -> String {
@@ -110,58 +247,36 @@ fn default_tts_timeout() -> u64 {
 
 /// storyor —— 小说评书朗读生成器
 ///
-/// 三阶段流水线：小模型逐章摘要 → 大模型切分剧情段并生成 JSON 剧本
-/// → TTS 模型按段落合成音频。支持断点续跑、分段音频输出与清单管理。
+/// 以 Web UI 服务器模式运行（v2 交互式工作流）。启动后监听
+/// `host:port`，前端访问即可操作四阶段流水线。
 #[derive(Parser, Debug)]
 #[command(name = "storyor", version, about)]
 pub struct Cli {
-    /// 输入小说文本文件路径
-    #[arg(short, long)]
-    pub input: PathBuf,
-
     /// 配置文件路径（TOML/JSON）
     #[arg(short, long, default_value = "storyor.toml")]
     pub config: PathBuf,
-
-    /// 输出目录（覆盖配置文件中的 output_dir）
-    #[arg(short, long)]
-    pub output: Option<PathBuf>,
-
-    /// 从最近断点继续
-    #[arg(long, default_value_t = false)]
-    pub resume: bool,
-
-    /// 忽略 checkpoint，全量重跑
-    #[arg(long, default_value_t = false)]
-    pub force: bool,
-
-    /// 音频格式（覆盖配置文件）
+    /// 监听地址（覆盖配置文件）
     #[arg(long)]
-    pub audio_format: Option<String>,
-
-    /// 摘要并发数（覆盖配置文件）
+    pub host: Option<String>,
+    /// 监听端口（覆盖配置文件）
     #[arg(long)]
-    pub concurrency: Option<usize>,
-
-    /// 章节切分正则（覆盖配置文件）
+    pub port: Option<u16>,
+    /// 工作区目录（覆盖配置文件，所有项目存放根目录）
     #[arg(long)]
-    pub chapter_regex: Option<String>,
+    pub workspace: Option<PathBuf>,
 }
 
 impl Cli {
     /// 将 CLI 覆盖项应用到配置
     pub fn apply_overrides(&self, config: &mut AppConfig) {
-        if let Some(out) = &self.output {
-            config.output_dir = out.clone();
+        if let Some(host) = &self.host {
+            config.server.host = host.clone();
         }
-        if let Some(fmt) = &self.audio_format {
-            config.audio_format = fmt.clone();
+        if let Some(port) = self.port {
+            config.server.port = port;
         }
-        if let Some(c) = self.concurrency {
-            config.max_concurrency = c;
-        }
-        if let Some(r) = &self.chapter_regex {
-            config.chapter_regex = r.clone();
+        if let Some(ws) = &self.workspace {
+            config.workspace.dir = ws.clone();
         }
     }
 }

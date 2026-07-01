@@ -9,6 +9,8 @@ pub mod config;
 pub mod error;
 pub mod novel;
 pub mod pipeline;
+pub mod project;
 pub mod prompts;
 pub mod script;
+pub mod server;
 pub mod tts;
