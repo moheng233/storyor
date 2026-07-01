@@ -42,6 +42,30 @@
 // src/script.rs
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export)]  // 自动导出到 bindings/ 目录
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Action {
+    Say {
+        speaker: String,
+        content: String,
+        description: String,
+    },
+    Wait {
+        duration: String,  // "short" | "medium" | "long"
+    },
+    Play {
+        sound: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct Paragraph {
+    pub index: usize,
+    pub actions: Vec<Action>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Script {
     pub segment_index: usize,
     pub characters: CharacterLibrary,
@@ -129,6 +153,194 @@ export function updateScript(id: string, segIdx: number, body: Script): Promise<
 - **部署方式**：仅本地运行，无需鉴权/多用户
 - 其余继承 v1 决策（章节正则、角色库顺序传递、断点续跑、提示词外置）
 
+## 🔑 剧本格式重构（v2 重大变更）
+
+### 设计动机
+
+当前 v1 剧本格式中，`ScriptLine.content` 需要内联拟声词（如 `（敲桌）`、`（巨大爆炸声）`），但 TTS 模型无法生成拟声词/音效 —— 它只能合成人声。同时现有格式无法精确控制停顿，导致音频节奏无法调整。
+
+因此 v2 将剧本从 **纯台词列表** 重构为 **动作序列（Action Sequence）**，在时间线上精确编排：说话、停顿、音效。
+
+### 新格式：Action 序列
+
+```
+Script (per segment)
+├── characters: CharacterLibrary      // 角色库（不变）
+├── paragraphs: [                     // 段落分组保留（情绪/场景单位）
+│   {
+│     "index": 0,
+│     "actions": [                    // ← 原 lines → 改为 actions
+│       { "type": "say",   ... },     // 说话
+│       { "type": "wait",  ... },     // 停顿
+│       { "type": "play",  ... },     // 音效
+│       { "type": "say",   ... },
+│     ]
+│   }
+│ ]
+└── handoff: string                   // 衔接话（不变）
+```
+
+### 三种 Action 类型
+
+#### 1. `say` — 角色台词 / 旁白
+
+TTS 人声合成的唯一输入。`content` 为**台词文本，允许括号包裹的人声演绎提示，但禁止人声无法表现的拟声词/音效**。
+
+```json
+{
+  "type": "say",
+  "speaker": "岑清霜",
+  "content": "（紧张，深呼吸）呼……冷静，冷静。",
+  "description": "刚刚经历一场恶战，呼吸急促，努力平复心情，声音微微发颤"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `speaker` | 说话者（角色名或 `"旁白"`） |
+| `content` | 台词文本，**允许**括号包裹的人声演绎提示（TTS `（风格）` 和 `[音频标签]`），包括但不限于：情绪（`（紧张）`、`（怅然）`）、语调（`（低沉）`、`（慵懒）`）、呼吸（`（深呼吸）`、`（长叹一口气）`）、哭笑（`（冷笑）`、`（哽咽）`）、语速（`（语速加快）`）、语音特征（`（颤抖）`、`（气声）`）、方言（`（东北话）`）等。**禁止**人声无法表现的拟声词/音效（如 `（敲桌）`、`（爆炸声）`、`（风声）`、`（脚步）`）。直接作为 TTS 的 assistant 消息 |
+| `description` | 导演模式演绎指导（100-300字），合并入 TTS 的 user 消息 |
+
+**与 v1 的关键区别**：`content` 从 `"（紧张，深呼吸）（敲桌）呼……冷静，冷静。"` 变为 `"（紧张，深呼吸）呼……冷静，冷静。"` —— 人声演绎提示保留，但非人声拟声词/音效从 content 中分离，转为独立的 `play` 动作。
+
+#### 2. `wait` — 停顿控制
+
+在时间线中插入静音段，控制节奏。
+
+```json
+{ "type": "wait", "duration": "short" }
+```
+
+`duration` 使用**语义标签**，由配置文件映射为实际秒数：
+
+```toml
+[timing]
+short_pause_secs = 0.5    # 短停顿（逗号、换气）
+medium_pause_secs = 1.5   # 中停顿（句间、场景微转）
+long_pause_secs = 3.0     # 长停顿（场景转换、悬念）
+```
+
+| 标签 | 适用场景 |
+|------|----------|
+| `"short"` | 逗号/换气/话锋微转 |
+| `"medium"` | 句间停顿/情绪切换 |
+| `"long"` | 场景转换/悬念留白/章节分隔 |
+
+#### 3. `play` — 音效触发
+
+在时间线中插入预置音效文件。
+
+```json
+{ "type": "play", "sound": "knock_door" }
+```
+
+`sound` 对应预置音效库中的文件名（不含扩展名）。若找不到对应文件，生成等长静音占位并警告。
+
+### 完整示例
+
+```json
+{
+  "segment_index": 0,
+  "paragraphs": [
+    {
+      "index": 0,
+      "actions": [
+        {
+          "type": "say",
+          "speaker": "旁白",
+          "content": "夜色如墨，一道黑影掠过屋檐。",
+          "description": "评书口吻，压低声音制造悬念，语速稍慢"
+        },
+        { "type": "wait", "duration": "medium" },
+        {
+          "type": "play",
+          "sound": "wind_howl"
+        },
+        { "type": "wait", "duration": "short" },
+        {
+          "type": "say",
+          "speaker": "岑清霜",
+          "content": "谁在那里？",
+          "description": "警觉、戒备，声音清冷而锐利"
+        },
+        { "type": "wait", "duration": "short" },
+        {
+          "type": "play",
+          "sound": "footsteps_stone"
+        }
+      ]
+    }
+  ],
+  "handoff": "岑清霜发现有人跟踪，准备迎战……"
+}
+```
+
+### LLM 提示词变更
+
+- **`prompts/script.md`**：指示大模型输出 action 序列（`say`/`wait`/`play`），在合适的时机插入停顿和音效。`say.content` 允许 TTS 的 `（风格）` 和 `[音频标签]`（情绪、语调、呼吸、哭笑、语速、语音特征、方言等），但人声无法表现的拟声词/音效必须通过 `play` 动作单独表达。
+- **`prompts/story_teller.md`**：新增系统指令：理解停顿标签和音效触发规则。
+- **JSON Schema**：`script_schema()` 重构为 action-based schema，使用 `oneOf` / `anyOf` 表达三种 action 类型。
+
+### 音频合成流程变化
+
+```
+当前 v1（逐行合成 → 拼接）：
+  for line in paragraph.lines:
+      mp3 = tts.synthesize(line.content)
+  → concat all mp3s → segment.wav
+
+v2（动作序列合成 → 交叉拼接）：
+  for action in paragraph.actions:
+      match action:
+          Say  → mp3 = tts.synthesize(action.content, action.description)
+          Wait → silence = generate_silence(action.duration)
+          Play → sfx = load_sound_effect(action.sound)
+  → concat交替拼接(say_mp3 + silence + sfx + ...) → segment.wav
+```
+
+- **TTS 调用不变**：`synthesize_line` 仍然接收 `content` + `description`，`content` 保留人声演绎提示（`（紧张）`等），仅移除人声无法表现的音效标注
+- **Wait 处理**：生成指定时长的静音 PCM 数据（采样率/声道从相邻 TTS 产物探测）
+- **Play 处理**：从预置音效库加载文件，解码为 PCM 后插入
+
+### 预置音效库
+
+```
+assets/sounds/
+├── index.toml              # 音效名 → 文件名 + 元信息
+├── knock_door.mp3
+├── wind_howl.mp3
+├── footsteps_stone.mp3
+├── explosion.mp3
+├── thunder.mp3
+├── ...
+└── silence_1s.mp3          # fallback 静音
+```
+
+`index.toml` 格式：
+
+```toml
+[sounds.knock_door]
+file = "knock_door.mp3"
+description = "敲门声（木门）"
+category = "日常"
+
+[sounds.wind_howl]
+file = "wind_howl.mp3"
+description = "呼啸风声"
+category = "环境"
+```
+
+### 前端编辑器适配
+
+剧本编辑器需要适配新的 action 列表结构：
+
+- **ActionTimeline** 组件：可视化时间线，展示 say/wait/play 动作序列
+- say 行内编辑：speaker 下拉 + content 文本框（允许括号人声提示，禁止音效标注）+ description 可折叠
+- wait 行内编辑：duration 下拉（short/medium/long）
+- play 行内编辑：sound 下拉（从音效库 index 读取可用列表）+ 试听按钮
+- 支持拖拽重排 action 顺序
+- 原始 JSON 编辑视图同步更新
+
 ## 项目产物目录结构（每个项目独立）
 
 在 `workspace_dir/` 下按项目名分目录。每个项目目录延续 v1 `output/` 格式，新增 `voices/` 子目录。
@@ -154,8 +366,9 @@ export function updateScript(id: string, segIdx: number, body: Script): Promise<
     │   └── ...
     ├── audio/
     │   ├── segment_0001/
-    │   │   ├── p0000_l0000.mp3
-    │   │   ├── segment.wav
+    │   │   ├── p0000_a0000.mp3       # say action 的 TTS 产物
+    │   │   ├── p0000_a0001.sil.mp3   # wait 生成的静音段
+    │   │   ├── segment.wav            # action 序列交叉拼接后的完整 WAV
     │   │   └── ...
     │   └── ...
     ├── manifest.json
@@ -253,11 +466,12 @@ export function updateScript(id: string, segIdx: number, body: Script): Promise<
 
 **C5. 音频合成** (`src/server/routes/audio.rs`)
 - `POST /api/projects/:id/audio/synthesize` — 合成全部未完成段落的音频（异步）
-- `POST /api/projects/:id/audio/segments/:segIdx/synthesize` — **单段合成**：仅合成指定剧情段的全部台词（异步，支持 `extra_prompt` 注入合成参数）
-- `GET /api/projects/:id/audio/status` — 合成进度（按段粒度展示：哪些段已完成、当前正在合成哪段哪句）
-- `GET /api/projects/:id/audio/segments/:segIdx/paragraphs/:paraIdx` — 获取段落音频（单次 TTS 调用产物）
-- `GET /api/projects/:id/audio/segments/:segIdx/segment.wav` — 获取合并音频
+- `POST /api/projects/:id/audio/segments/:segIdx/synthesize` — **单段合成**：按 action 序列依次处理（say→TTS合成 / wait→插入静音 / play→加载音效文件），异步
+- `GET /api/projects/:id/audio/status` — 合成进度（按段粒度展示：哪些段已完成、当前正在合成哪段的哪个 action）
+- `GET /api/projects/:id/audio/segments/:segIdx/actions/:actionIdx` — 获取单个 action 的音频产物（say 的 TTS 产物 / play 的音效文件）
+- `GET /api/projects/:id/audio/segments/:segIdx/segment.wav` — 获取合并音频（action 序列交叉拼接后的完整 WAV）
 - `GET /api/projects/:id/manifest` — 获取音频清单
+- `GET /api/projects/:id/sounds` — 获取可用音效列表（从 `assets/sounds/index.toml` 读取）
 
 **C6. SSE 进度端点**
 - `GET /api/projects/:id/events` — Server-Sent Events 推送所有阶段进度
@@ -317,6 +531,14 @@ port = 3001
 
 [workspace]
 dir = "./workspace"
+
+[timing]
+short_pause_secs = 0.5     # 短停顿
+medium_pause_secs = 1.5    # 中停顿
+long_pause_secs = 3.0      # 长停顿
+
+[sounds]
+dir = "./assets/sounds"    # 预置音效库目录
 ```
 
 **E2. CLI 适配**
@@ -383,24 +605,30 @@ frontend/
 |------|------|------|
 | `Cargo.toml` | 修改 | 新增 axum/tower-http/uuid/ts-rs/axfetchum |
 | `src/main.rs` | 修改 | 新增 `server` 子命令 |
-| `src/config.rs` | 修改 | 新增 voice_design/clone/server/workspace 配置 |
+| `src/config.rs` | 修改 | 新增 voice_design/clone/server/workspace/timing/sounds 配置 |
 | `src/error.rs` | 修改 | 新增 Server/Project 错误变体 |
 | `src/tts/client.rs` | 修改 | VoiceDesign + VoiceClone 双模式 |
-| `src/pipeline/mod.rs` | 修改 | 拆分为独立阶段函数 |
+| `src/pipeline/mod.rs` | 修改 | 拆分为独立阶段函数；音频合成改为 action 序列驱动 |
 | `src/pipeline/script.rs` | 修改 | 支持单段独立生成 + 单段重新生成（extra_prompt）+ 对话式修改（chat context） |
 | `src/checkpoint.rs` | 修改 | 适配新阶段定义（preprocess/scripts/voices/audio） |
-| `src/script.rs` | 修改 | 新增 VoiceRef 字段，添加 `#[derive(TS)]` |
+| `src/script.rs` | **重构** | TextLine → Action 枚举（say/wait/play），Schema 重构，新增 `#[derive(TS)]` |
 | `src/character.rs` | 修改 | 添加 `#[derive(TS)]` 导出角色类型 |
+| `src/audio.rs` | **重构** | 逐行拼接 → action 序列交叉拼接（TTS + 静音 + 音效），新增 wait 生成和 play 解码 |
+| `src/sounds.rs` | **新增** | 音效库管理（从 `assets/sounds/index.toml` 加载，按名称查找文件） |
 | `src/server/mod.rs` | **新增** | axum 服务启动 |
 | `src/server/state.rs` | **新增** | 共享状态 |
 | `src/server/types.rs` | **新增** | API 请求/响应类型（`#[derive(TS)]`） |
 | `src/server/events.rs` | **新增** | 进度事件 |
 | `src/server/routes/*.rs` | **新增** | 5 组 API 端点 + `api_routes!` 声明 |
 | `src/project.rs` | **新增** | 项目管理 CRUD |
+| `prompts/script.md` | **修改** | 输出格式从台词列表改为 action 序列 |
+| `prompts/story_teller.md` | **修改** | 新增停顿标签和音效触发规则的系统指令 |
+| `assets/sounds/index.toml` | **新增** | 预置音效库索引 |
 | `frontend/` | **新增** | React 项目（shadcn/ui + Tailwind CSS + TypeScript）+ bindings/ 自动生成的 TS 代码 |
 
 ## Decisions
 
+- **剧本格式重构**：台词从 `ScriptLine` 改为 `Action` 枚举（`Say`/`Wait`/`Play`）。`Say.content` 保留人声演绎提示（`（紧张）`等），非人声拟声词/音效通过 `Play` 独立表达，停顿通过 `Wait` 精确控制
 - **音频合成分段独立**：与剧本段一一对应，每段可独立触发合成，不依赖其他段。checkpoint 按段粒度记录音频完成状态，支持单段重新合成（覆盖旧产物）
 - **前后端类型安全**：Rust 为单一事实来源，`ts-rs`（`#[derive(TS)]`）自动导出 TS 类型定义，`axfetchum`（`api_routes!`）自动生成带类型的 TS API 客户端。前端代码零手写 API 类型，编译期保证前后端契约一致
 - **音色设计工作流**：`voicedesign` 返回音频样本 → 用户试听 → 修改 guidance 重新生成 → 确认后锁定 → `voiceclone` 以该音频为参考做 few-shot 克隆
@@ -426,12 +654,13 @@ frontend/
 ## Further Considerations
 
 1. **voicedesign / voiceclone API 细节待确认**：具体 HTTP 请求/响应格式需要在首次调试时确定，当前通过 `extra_body` 灵活适配
-2. **前端富文本编辑**：台词 content 含内联标签如 `（怅然）（深呼吸）`，剧本编辑器初期用纯文本框，后续可考虑可视化标签插入
-3. **异步任务生命周期**：剧本生成和音频合成耗时较长，需用 `tokio::spawn` 异步执行，通过 SSE 推送进度；任务不持久化到数据库，仅通过文件系统 checkpoint 判断完成情况
-4. **错误恢复**：每个阶段/段/句的失败应可重试，不影响已完成部分
-5. **ts-rs 与 axfetchum 集成**：
+2. **前端 ActionTimeline 编辑器**：剧本编辑器需从台词列表视图改为时间线视图，展示 say/wait/play 动作序列；say.content 保留人声提示（`（紧张）`等），wait 和 play 用不同颜色标注
+3. **音效库覆盖度**：初期预置基础音效（风雨、敲门、爆炸、脚步等），后续根据实际剧本需求逐步扩充
+4. **异步任务生命周期**：剧本生成和音频合成耗时较长，需用 `tokio::spawn` 异步执行，通过 SSE 推送进度；任务不持久化到数据库，仅通过文件系统 checkpoint 判断完成情况
+5. **错误恢复**：每个阶段/段/句的失败应可重试，不影响已完成部分
+6. **ts-rs 与 axfetchum 集成**：
    - 构建流程中增加 `cargo test`（触发 ts-rs 导出）和 axfetchum 生成的检查步骤
    - CI 中用 `axfetchum::check()` 防止手动修改生成文件导致前后端类型漂移
    - 前端 `package.json` 中添加 `generate:bindings` 脚本，一键运行 Rust 端的类型导出
-6. **对话式修改的上下文管理**：`POST /scripts/:segIdx/chat` 端点每次收到用户消息时，需构造完整的对话上下文（系统提示词 + 当前剧本完整 JSON + 之前的修改对话历史），大模型才能在充分理解现状的基础上给出精准修改。对话历史不需要持久化（每次会话独立），但当前剧本作为每次请求的必要上下文始终注入
+7. **对话式修改的上下文管理**：`POST /scripts/:segIdx/chat` 端点每次收到用户消息时，需构造完整的对话上下文（系统提示词 + 当前剧本完整 JSON + 之前的修改对话历史），大模型才能在充分理解现状的基础上给出精准修改。对话历史不需要持久化（每次会话独立），但当前剧本作为每次请求的必要上下文始终注入
 

@@ -2,6 +2,16 @@
 
 ## 当前阶段：v2 交互式工作流 + Web UI 架构升级规划中 📋
 
+## 最新变更：剧本格式重构 + v2 计划补充 ✅
+
+- [x] `PLAN.md` 新增 **剧本格式重构** 章节：Action 序列（`say`/`wait`/`play`）替代 `ScriptLine`
+- [x] 决策确认：预置音效库方案（找不到 fallback 静音）、停顿时长语义标签（short/medium/long）、保持两层嵌套（Script → Paragraph → Action）、play 为时间线事件点（非背景混音）
+- [x] 配置扩展：新增 `[timing]` 节（三种停顿时长映射）和 `[sounds]` 节（音效库目录路径）
+- [x] 关键文件变更清单更新：`src/script.rs` 标记为**重构**、`src/audio.rs` 标记为**重构**、新增 `src/sounds.rs`
+- [x] 产品目录结构更新：音频命名从 `p{i}_l{j}.mp3` 改为 `p{i}_a{j}.mp3`（action index），新增独属于 wait 的 `.sil.mp3`
+
+---
+
 ## 最新变更：v2 计划已制定 ✅
 
 - [x] `PLAN.md` 已更新为 v2 完整架构计划（四阶段交互式工作流 + axum + React）
