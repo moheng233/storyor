@@ -34,3 +34,6 @@ pub struct HealthResponse {
     /// 工作区目录
     pub workspace: String,
 }
+
+crate::register_ts!(ErrorResponse);
+crate::register_ts!(HealthResponse);

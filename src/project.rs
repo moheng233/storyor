@@ -135,6 +135,11 @@ pub struct CreateProjectRequest {
     pub novel_text: String,
 }
 
+crate::register_ts!(ProjectMeta);
+crate::register_ts!(ProjectListItem);
+crate::register_ts!(ProjectPhase);
+crate::register_ts!(CreateProjectRequest);
+
 // ---------------------------------------------------------------------------
 // 项目管理器
 // ---------------------------------------------------------------------------

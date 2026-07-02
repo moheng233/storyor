@@ -9,12 +9,11 @@
 //! 这是 v2 架构的「单一来源」机制：Rust 端的 struct / 路由定义是唯一真相源，
 //! 前端类型与 API 客户端全部自动生成，杜绝前后端类型漂移。
 //!
+//! 类型导出清单由各类型定义处的 `register_ts!(T)` 宏就近登记，
+//! 经 `inventory` 全局注册表自动收集，测试端无需维护类型列表。
 //! CI 可配合 `axfetchum::check()` 校验生成文件是否过期。
 
-use storyor::project::{CreateProjectRequest, ProjectListItem, ProjectMeta};
-use storyor::server::routes;
-use storyor::server::types::{ErrorResponse, HealthResponse};
-use ts_rs::{Config, TS};
+use ts_rs::Config;
 
 /// 前端类型绑定导出目录（与 axfetchum 生成的 `api.ts` 同目录）
 const BINDINGS_DIR: &str = "frontend/src/bindings";
@@ -24,19 +23,12 @@ fn export_bindings() {
     // 构造 ts-rs 导出配置：显式指定输出目录，无需依赖 .cargo/config.toml 环境变量。
     let cfg = Config::new().with_out_dir(BINDINGS_DIR);
 
-    // 显式导出各根类型及其全部依赖（如 DateTime、各 enum 变体）。
-    // `TS::export_all` 会递归把依赖类型也写入磁盘，因此只需调用顶层入口类型。
-    // ProjectMeta 包含 ProjectPhase / DateTime，exports 后两者自动落盘。
-    ProjectMeta::export_all(&cfg).expect("导出 ProjectMeta 失败");
-    ProjectListItem::export_all(&cfg).expect("导出 ProjectListItem 失败");
-    CreateProjectRequest::export_all(&cfg).expect("导出 CreateProjectRequest 失败");
-    HealthResponse::export_all(&cfg).expect("导出 HealthResponse 失败");
-    ErrorResponse::export_all(&cfg).expect("导出 ErrorResponse 失败");
+    // 导出所有已注册（`register_ts!`）的 TS 类型及其依赖到磁盘。
+    // `TS::export_all` 会递归导出依赖，因此只需登记顶层入口类型。
+    let count = storyor::ts_export::export_all(&cfg).expect("导出 TS 类型失败");
+    eprintln!("✅ 已导出 {count} 个根 TS 类型到 {BINDINGS_DIR}/");
 
     // 触发 axfetchum 生成 TS API 客户端
-    if let Err(e) = routes::export_bindings() {
-        panic!("生成前端 TS 绑定失败: {e}");
-    }
-
-    eprintln!("✅ 前端 TS 绑定已（重新）生成到 {BINDINGS_DIR}/");
+    storyor::server::routes::export_bindings().expect("生成前端 TS 绑定失败");
+    eprintln!("✅ 前端 TS API 客户端已生成到 {BINDINGS_DIR}/api.ts");
 }

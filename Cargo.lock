@@ -879,6 +879,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1113,9 +1122,9 @@ dependencies = [
 
 [[package]]
 name = "noyalib"
-version = "0.0.8"
+version = "0.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14057395c16a4230575c6f86bfa074db87e8458626d3e56b20c2454334a7e50c"
+checksum = "70fbde2dc0a7a7573769ff292f54108ea080a2afd73cbfe337033d0aa4bdd3df"
 dependencies = [
  "indexmap",
  "itoa",
@@ -1499,7 +1508,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tower",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -1537,7 +1546,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -1945,6 +1954,7 @@ dependencies = [
  "clap",
  "futures",
  "hound",
+ "inventory",
  "llm",
  "noyalib",
  "regex",
@@ -1959,7 +1969,7 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tower",
- "tower-http",
+ "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
  "ts-rs",
@@ -2310,6 +2320,24 @@ checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
  "bitflags 2.13.0",
  "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "pin-project-lite",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "url",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
+dependencies = [
+ "bitflags 2.13.0",
+ "bytes",
  "futures-core",
  "futures-util",
  "http",
@@ -2323,10 +2351,8 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
- "tower",
  "tower-layer",
  "tower-service",
- "url",
 ]
 
 [[package]]

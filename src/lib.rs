@@ -13,4 +13,5 @@ pub mod project;
 pub mod prompts;
 pub mod script;
 pub mod server;
+pub mod ts_export;
 pub mod tts;
