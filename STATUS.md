@@ -2,6 +2,24 @@
 
 ## 当前阶段：v2 交互式工作流 + Web UI 架构升级 — Phase A 完成 ✅
 
+## 最新变更：移除 `llm` crate，改用 reqwest 直连 OpenAI chat_completions ✅
+
+- [x] **动机**：不再依赖第三方 `llm` crate，直接用项目已有的 `reqwest` 实现 OpenAI 兼容 `/v1/chat/completions` 客户端，降低依赖面、便于扩展流式输出。
+- [x] **新增 `src/llm/` 模块**（自包含 OpenAI 兼容客户端）：
+  - `src/llm/mod.rs` — 模块入口，定义 `ChatClient` trait（`chat` / `chat_with_format`），导出 `ChatMessage`/`ChatResponse`/`Choice`/`ResponseFormat`/`JsonSchemaFormat`/`Role` 等。
+  - `src/llm/types.rs` — 手动实现 OpenAI 请求/响应类型（`ChatCompletionRequest`、`ResponseFormat::{Text,JsonObject,JsonSchema}`、`JsonSchemaFormat`、`ChatResponse`、`Choice`、`Usage`、`OpenAiErrorBody`）。`ChatMessage` 提供 `system()`/`user()`/`assistant()` 构造器。
+  - `src/llm/client.rs` — `OpenAiClient`（基于 `reqwest`）：`new(ModelConfig)`、`chat_with_format()` 走 `response_format: json_schema` 严格结构化输出；`chat_stream()` 返回 `impl Stream<Item = Result<String>>`，SSE 解析 `data:` 增量 content，遇 `[DONE]` 结束（供后续 Web UI 聊天改稿使用）。
+- [x] **结构化输出保留严格模式**：`segment`/`script` 阶段通过 `response_format: {type: "json_schema", json_schema: ...}` 强制 JSON，`script_schema()`/`segment_schema()` 返回类型由 `StructuredOutputFormat` 改为自实现 `JsonSchemaFormat`（字段语义不变）。
+- [x] **config 简化**：移除 `llm::builder::LLMBackend` 导入与 `ModelConfig::parse_backend()`，新增 `backend_label()`（仅展示/日志）；`backend` 字段保留为字符串，所有服务按 OpenAI 兼容接口处理，`base_url` 决定实际服务商。
+- [x] **流水线接入新 trait**：`Pipeline`/`SummaryStage`/`SegmentStage`/`ScriptStage` 的 `small_model`/`large_model` 从 `&dyn ChatProvider` 改为 `&dyn ChatClient`；消息构造改为 `ChatMessage::assistant(...)` / `ChatMessage::user(...)`；`segment`/`script` 调用 `chat_with_format(..., Some(ResponseFormat::JsonSchema{...}))`。
+- [x] **测试 mock 替换**：`tests/common/mod.rs` 移除全部 `llm` import，改为基于 `storyor::llm::ChatClient` 的 `MockProvider`（保留队列消费与 user 消息记录行为），并提供 `mock_response()` 辅助；`tests/pipeline_stages.rs` / `tests/full_pipeline.rs` 的 `test_config` 补全缺失字段（`max_tokens`、`voice_*`、`server`/`workspace`/`timing`/`sounds`）。
+- [x] **依赖清理**：`Cargo.toml` 删除 `llm = "1.3.8"`，新增 `async-stream = "0.3"`、`bytes = "1"`、`async-trait`（移至正式依赖），`reqwest` 启用 `stream` feature；`Cargo.lock` 已无 `llm` 子依赖。
+- [x] **验证**：`cargo check --all-targets` 通过；`cargo test` **50 个测试全部通过**（单元 35 + pipeline_stages 8 + full_pipeline 6 + export_bindings 1）。
+
+> 备注：流式 `chat_stream` 已实现但暂未在流水线中使用；后续 Web UI 聊天改稿路由（`/api/chat`）将基于它落地。
+
+---
+
 ## 最新变更：Phase A 后端基础设施落地 ✅
 
 - [x] **依赖**：`Cargo.toml` 新增 `axum`/`tower`/`tower-http`/`uuid`/`axfetchum`(含 `axum` feature)/`ts-rs`(含 `chrono-impl` feature)
@@ -125,7 +143,7 @@
 - [ ] 手动验证：真实小模型跑 1-3 章短篇，检查摘要/切分/剧本/角色库一致性
 - [ ] 手动验证：真实 TTS 模型跑单段剧本，检查 base64 音频提取与输出文件可播放
 - [ ] 断点续跑验证：中途 Ctrl-C 后重启，确认跳过已完成阶段
-- [ ] TTS 底层通信：调研 `llm` crate 是否暴露底层 HTTP 客户端（当前已用独立 `reqwest` 实现）
+- [x] TTS 底层通信：已用独立 `reqwest` 实现（本次进一步移除 `llm` crate，统一为自实现 OpenAI 兼容客户端）
 
 ## 模块结构
 ```

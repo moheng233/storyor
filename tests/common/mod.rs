@@ -3,60 +3,38 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use llm::chat::{ChatMessage, ChatProvider, ChatResponse};
-use llm::error::LLMError;
-use llm::ToolCall;
+use storyor::error::StoryorError;
+use storyor::llm::{ChatClient, ChatDeltaStream, ChatMessage, ChatResponse, JsonSchemaFormat};
 
 // ---------------------------------------------------------------------------
-// Mock ChatResponse
+// Mock ChatResponse（直接复用 storyor::llm::ChatResponse，构造固定文本）
 // ---------------------------------------------------------------------------
 
-/// 固定文本的 mock 响应
-pub struct MockResponse {
-    text: Option<String>,
-}
-
-impl MockResponse {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: Some(text.into()),
-        }
-    }
-}
-
-impl std::fmt::Debug for MockResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MockResponse")
-            .field("text", &self.text)
-            .finish()
-    }
-}
-
-impl std::fmt::Display for MockResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.text {
-            Some(t) => write!(f, "{t}"),
-            None => write!(f, "<empty>"),
-        }
-    }
-}
-
-impl ChatResponse for MockResponse {
-    fn text(&self) -> Option<String> {
-        self.text.clone()
-    }
-    fn tool_calls(&self) -> Option<Vec<ToolCall>> {
-        None
+/// 构造一个仅含文本内容的 `ChatResponse`（mock 用）
+pub fn mock_response(text: impl Into<String>) -> ChatResponse {
+    ChatResponse {
+        id: "mock".to_string(),
+        model: "mock-model".to_string(),
+        choices: vec![storyor::llm::Choice {
+            index: 0,
+            message: storyor::llm::ResponseMessage {
+                role: "assistant".to_string(),
+                content: Some(text.into()),
+                audio: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: None,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Mock ChatProvider
+// Mock ChatClient
 // ---------------------------------------------------------------------------
 
 /// 按调用顺序返回预设响应的 mock provider
 ///
-/// 内部维护一个响应队列，每次 `chat()` 调用弹出下一个响应。
+/// 内部维护一个响应队列，每次 `chat_with_schema()` 调用弹出下一个响应。
 /// 同时记录所有调用收到的消息内容，便于断言。
 pub struct MockProvider {
     /// 预设响应队列（按调用顺序消费）
@@ -77,7 +55,7 @@ impl MockProvider {
     fn record(&self, messages: &[ChatMessage]) {
         let user_text: Vec<String> = messages
             .iter()
-            .filter(|m| matches!(m.role, llm::chat::ChatRole::User))
+            .filter(|m| m.is_user())
             .map(|m| m.content.clone())
             .collect();
         self.received_user_contents
@@ -85,24 +63,46 @@ impl MockProvider {
             .unwrap()
             .extend(user_text);
     }
-}
 
-#[async_trait]
-impl ChatProvider for MockProvider {
-    async fn chat_with_tools(
-        &self,
-        messages: &[ChatMessage],
-        _tools: Option<&[llm::chat::Tool]>,
-    ) -> Result<Box<dyn ChatResponse>, LLMError> {
-        self.record(messages);
+    /// 弹出下一个预设响应文本
+    fn next_response(&self) -> Result<String, StoryorError> {
         let mut queue = self.responses.lock().unwrap();
         if queue.is_empty() {
-            return Err(LLMError::Generic(
+            return Err(StoryorError::Llm(
                 "mock provider 响应队列已耗尽".to_string(),
             ));
         }
-        let text = queue.remove(0);
-        Ok(Box::new(MockResponse::new(text)))
+        Ok(queue.remove(0))
+    }
+}
+
+#[async_trait]
+impl ChatClient for MockProvider {
+    async fn chat_with_schema(
+        &self,
+        messages: &[ChatMessage],
+        _schema: Option<&JsonSchemaFormat>,
+    ) -> Result<ChatResponse, StoryorError> {
+        self.record(messages);
+        let text = self.next_response()?;
+        Ok(mock_response(text))
+    }
+
+    async fn chat(&self, messages: &[ChatMessage]) -> Result<ChatResponse, StoryorError> {
+        self.chat_with_schema(messages, None).await
+    }
+
+    fn chat_stream(&self, messages: Vec<ChatMessage>) -> ChatDeltaStream<'_> {
+        self.record(&messages);
+        // 把队列中下一个响应整体作为一个 delta 一次性产出。
+        let next = self.next_response();
+        let stream = async_stream::stream! {
+            match next {
+                Ok(text) => yield Ok(text),
+                Err(e) => yield Err(e),
+            }
+        };
+        Box::pin(stream)
     }
 }
 

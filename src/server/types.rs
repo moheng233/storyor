@@ -11,7 +11,7 @@ use ts_rs::TS;
 
 /// 统一错误响应体（所有 4xx/5xx 返回此结构）
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct ErrorResponse {
     /// 错误消息（人类可读）
     pub error: String,
@@ -25,7 +25,7 @@ impl ErrorResponse {
 
 /// 健康检查响应
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct HealthResponse {
     /// 服务名称
     pub service: String,

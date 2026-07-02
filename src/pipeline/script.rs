@@ -8,23 +8,22 @@
 
 use std::path::{Path, PathBuf};
 
-use llm::chat::{ChatMessage, ChatProvider};
 use tracing::info;
 
 use crate::checkpoint::write_artifact;
 use crate::config::AppConfig;
-use crate::script::CharacterLibrary;
 use crate::error::{Result, StoryorError};
-use crate::script::{Chapter, PlotSegment, Script, ScriptBody};
+use crate::llm::{ChatClient, ChatMessage};
+use crate::script::{script_schema, CharacterLibrary, Chapter, PlotSegment, Script, ScriptBody};
 
 /// 剧本生成阶段
 pub struct ScriptStage<'a> {
     config: &'a AppConfig,
-    large_model: &'a dyn ChatProvider,
+    large_model: &'a dyn ChatClient,
 }
 
 impl<'a> ScriptStage<'a> {
-    pub fn new(config: &'a AppConfig, large_model: &'a dyn ChatProvider) -> Self {
+    pub fn new(config: &'a AppConfig, large_model: &'a dyn ChatClient) -> Self {
         Self { config, large_model }
     }
 
@@ -60,8 +59,8 @@ impl<'a> ScriptStage<'a> {
             .replace("{{max_paragraph_lines}}", &self.config.max_paragraph_lines.to_string());
 
         let messages = vec![
-            ChatMessage::assistant().content(story_teller).build(),
-            ChatMessage::user().content(prompt).build(),
+            ChatMessage::assistant(story_teller),
+            ChatMessage::user(prompt),
         ];
 
         info!(
@@ -71,9 +70,8 @@ impl<'a> ScriptStage<'a> {
 
         let resp = self
             .large_model
-            .chat(&messages)
-            .await
-            .map_err(|e| StoryorError::Llm(e.to_string()))?;
+            .chat_with_schema(&messages, Some(&script_schema()))
+            .await?;
 
         let text = resp
             .text()

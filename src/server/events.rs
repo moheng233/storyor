@@ -10,7 +10,7 @@ use ts_rs::TS;
 
 /// 流水线阶段标识（与 `ProjectPhase` 对齐，但用于事件上下文）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
     /// 预处理（章节切分 / 摘要 / 段划分）
@@ -27,7 +27,7 @@ pub enum Stage {
 ///
 /// 推送给前端以驱动 UI 进度展示（SSE）。
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProgressEvent {
     /// 阶段开始

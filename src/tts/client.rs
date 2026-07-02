@@ -3,80 +3,28 @@
 //! `TtsClient` 封装。`synthesize_line(speaker, content, description, library)` 对每条台词
 //! 构造单轮 chat 消息：user 为导演模式描述 + 角色库音色设定，assistant 为台词文本。
 //!
-//! **不走 `ChatProvider::chat()` 的 trait 抽象**——直接调用底层 HTTP 客户端
-//! 并反序列化原始 JSON，提取 `choices[0].message.audio.data` 做 base64 解码为 `Vec<u8>`。
-//! 音频格式由 CLI `--audio-format` 指定（默认 mp3）。
+//! HTTP 调用与 `/chat/completions` 请求/响应解析统一走 [`OpenAiClient::chat_audio`]，
+//! 本模块仅负责：消息构造、`audio` 配置传参、从 `choices[0].message.audio.data`
+//! 做 base64 解码为 `Vec<u8>`。音频格式由 CLI `--audio-format` 指定（默认 mp3）。
 
 use base64::Engine;
-use serde::Deserialize;
 use tracing::{debug, info};
 
 use crate::config::AppConfig;
 use crate::error::{Result, StoryorError};
+use crate::llm::{ChatMessage, OpenAiClient};
 use crate::script::CharacterLibrary;
-
-// ---------------------------------------------------------------------------
-// 原始响应反序列化结构
-// ---------------------------------------------------------------------------
-
-/// OpenAI 风格 chat completion 响应（仅提取所需字段）
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseMessage {
-    #[serde(default)]
-    audio: Option<AudioData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AudioData {
-    data: String,
-}
-
-// ---------------------------------------------------------------------------
-// 请求体构造
-// ---------------------------------------------------------------------------
-
-/// 请求消息
-#[derive(Debug, serde::Serialize)]
-struct RequestMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct AudioConfig {
-    format: String,
-    voice: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<RequestMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    audio: Option<AudioConfig>,
-}
 
 // ---------------------------------------------------------------------------
 // TTS 客户端
 // ---------------------------------------------------------------------------
 
-/// TTS 客户端：直接通过 HTTP 调用 chat 接口并提取 base64 音频
+/// TTS 客户端：复用 [`OpenAiClient`] 调用 chat 接口并提取 base64 音频
 pub struct TtsClient {
-    http: reqwest::Client,
-    base_url: String,
-    api_key: Option<String>,
-    model: String,
+    client: OpenAiClient,
     audio_format: String,
+    /// 默认音色（保留供未来在请求体 `audio.voice` 中使用，当前由 guidance 注入消息）
+    #[allow(dead_code)]
     voice: String,
     timeout_secs: u64,
 }
@@ -84,21 +32,10 @@ pub struct TtsClient {
 impl TtsClient {
     /// 从配置构造 TTS 客户端
     pub fn new(config: &AppConfig) -> Result<Self> {
-        let tts = &config.tts_model;
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.tts_timeout_secs))
-            .build()?;
-
-        let base_url = tts
-            .base_url
-            .clone()
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-
+        let client =
+            OpenAiClient::with_options(&config.tts_model, None, config.tts_timeout_secs)?;
         Ok(Self {
-            http,
-            base_url,
-            api_key: tts.api_key.clone(),
-            model: tts.model.clone(),
+            client,
             audio_format: config.audio_format.clone(),
             voice: config.tts_voice.clone(),
             timeout_secs: config.tts_timeout_secs,
@@ -129,24 +66,9 @@ impl TtsClient {
         };
 
         let messages = vec![
-            RequestMessage {
-                role: "user".to_string(),
-                content: user_prompt,
-            },
-            RequestMessage {
-                role: "assistant".to_string(),
-                content: content.to_string(),
-            },
+            ChatMessage::user(user_prompt),
+            ChatMessage::assistant(content.to_string()),
         ];
-
-        let request = ChatRequest {
-            model: self.model.clone(),
-            messages,
-            audio: Some(AudioConfig {
-                format: "mp3".to_string(),
-                voice: None,
-            }),
-        };
 
         debug!(
             "TTS 请求：{} \"{}\"",
@@ -154,34 +76,14 @@ impl TtsClient {
             content.chars().take(40).collect::<String>()
         );
 
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let mut req = self.http.post(&url).json(&request);
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
+        // 保持与原实现一致：请求体里 voice 字段为 None，
+        // 实际音色通过 guidance 注入 assistant 消息与 user prompt。
+        let resp = self
+            .client
+            .chat_audio(&messages, "mp3", None, None, None)
+            .await?;
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| StoryorError::Llm(format!("TTS 请求失败: {e}")))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| StoryorError::Llm(format!("TTS 响应读取失败: {e}")))?;
-
-        if !status.is_success() {
-            return Err(StoryorError::Llm(format!(
-                "TTS 请求返回 {status}: {}",
-                body.chars().take(500).collect::<String>()
-            )));
-        }
-
-        let parsed: ChatCompletionResponse = serde_json::from_str(&body)
-            .map_err(|e| StoryorError::Llm(format!("TTS 响应解析失败: {e}")))?;
-
-        let audio = parsed
+        let audio = resp
             .choices
             .into_iter()
             .next()

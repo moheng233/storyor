@@ -5,10 +5,11 @@
 
 use std::collections::HashMap;
 
-use llm::chat::StructuredOutputFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use ts_rs::TS;
+
+use crate::llm::JsonSchemaFormat;
 
 // ---------------------------------------------------------------------------
 // 基础数据结构
@@ -16,7 +17,7 @@ use ts_rs::TS;
 
 /// 章节切分结果
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct Chapter {
     /// 章节序号（从 0 开始）
     pub index: usize,
@@ -28,7 +29,7 @@ pub struct Chapter {
 
 /// 章节摘要
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct ChapterSummary {
     /// 对应章节序号
     pub chapter_index: usize,
@@ -38,7 +39,7 @@ pub struct ChapterSummary {
 
 /// 剧情段（由大模型基于全部章节摘要切分）
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct PlotSegment {
     /// 段落序号（从 0 开始）
     pub index: usize,
@@ -56,7 +57,7 @@ pub struct PlotSegment {
 
 /// 单个角色档案
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct CharacterProfile {
     /// 角色名
     pub name: String,
@@ -70,7 +71,7 @@ pub struct CharacterProfile {
 
 /// 角色库
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct CharacterLibrary {
     /// 角色名 -> 档案
     pub characters: HashMap<String, CharacterProfile>,
@@ -82,7 +83,7 @@ pub struct CharacterLibrary {
 
 /// 单句台词
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct ScriptLine {
     /// 说话者（角色名或 "旁白"）
     pub speaker: String,
@@ -95,7 +96,7 @@ pub struct ScriptLine {
 
 /// 段落：一组连续台词，作为一次 TTS 调用的单位
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct Paragraph {
     /// 段落序号（在当前剧情段内从 0 开始）
     pub index: usize,
@@ -105,7 +106,7 @@ pub struct Paragraph {
 
 /// 剧本：一个剧情段对应的完整剧本
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct Script {
     /// 对应剧情段序号
     pub segment_index: usize,
@@ -123,7 +124,6 @@ pub struct Script {
 
 /// 单个音频片段元数据
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
 pub struct AudioClip {
     /// 对应剧情段序号
     pub segment_index: usize,
@@ -142,7 +142,7 @@ pub struct AudioClip {
 // StructuredOutputFormat schema 构造
 // ---------------------------------------------------------------------------
 
-/// 构造剧本生成的 JSON schema（用于 `LLMBuilder::schema()`）
+/// 构造剧本生成的 JSON schema（用于 `response_format: json_schema` 严格模式）
 ///
 /// 对应 `Script` 中由大模型直接输出的部分（不含 segment_index）：
 /// ```json
@@ -152,7 +152,7 @@ pub struct AudioClip {
 ///   "handoff": "..."
 /// }
 /// ```
-pub fn script_schema() -> StructuredOutputFormat {
+pub fn script_schema() -> JsonSchemaFormat {
     let line_schema = json!({
         "type": "object",
         "properties": {
@@ -212,21 +212,21 @@ pub fn script_schema() -> StructuredOutputFormat {
         "additionalProperties": false
     });
 
-    StructuredOutputFormat {
+    JsonSchemaFormat {
         name: "script".to_string(),
         description: Some("评书朗读剧本，含角色库、段落分组与衔接话".to_string()),
-        schema: Some(schema),
-        strict: Some(true),
+        schema,
+        strict: true,
     }
 }
 
-/// 构造剧情段切分的 JSON schema（用于 `LLMBuilder::schema()`）
+/// 构造剧情段切分的 JSON schema（用于 `response_format: json_schema` 严格模式）
 ///
 /// 输出 `Vec<PlotSegment>` 的包装：
 /// ```json
 /// { "segments": [{"index","chapter_start","chapter_end","summary"}] }
 /// ```
-pub fn segment_schema() -> StructuredOutputFormat {
+pub fn segment_schema() -> JsonSchemaFormat {
     let segment_schema = json!({
         "type": "object",
         "properties": {
@@ -252,24 +252,24 @@ pub fn segment_schema() -> StructuredOutputFormat {
         "additionalProperties": false
     });
 
-    StructuredOutputFormat {
+    JsonSchemaFormat {
         name: "segments".to_string(),
         description: Some("剧情段切分结果".to_string()),
-        schema: Some(schema),
-        strict: Some(true),
+        schema,
+        strict: true,
     }
 }
 
 /// 大模型剧情段切分的响应包装
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct SegmentList {
     pub segments: Vec<PlotSegment>,
 }
 
 /// 大模型剧本生成的响应包装（不含 segment_index）
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+
 pub struct ScriptBody {
     pub characters: Vec<CharacterProfile>,
     pub paragraphs: Vec<Paragraph>,

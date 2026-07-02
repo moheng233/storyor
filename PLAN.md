@@ -664,3 +664,88 @@ frontend/
    - 前端 `package.json` 中添加 `generate:bindings` 脚本，一键运行 Rust 端的类型导出
 7. **对话式修改的上下文管理**：`POST /scripts/:segIdx/chat` 端点每次收到用户消息时，需构造完整的对话上下文（系统提示词 + 当前剧本完整 JSON + 之前的修改对话历史），大模型才能在充分理解现状的基础上给出精准修改。对话历史不需要持久化（每次会话独立），但当前剧本作为每次请求的必要上下文始终注入
 
+---
+
+## 子计划：用 reqwest 替换 llm crate 实现 OpenAI chat_completions 客户端
+
+当前代码通过 `llm` crate（v1.3.8）调用大模型。该 crate 的 `ChatProvider` trait 被 `pipeline` 三阶段（summary/segment/script）使用，测试中也通过 mock `ChatProvider` 注入响应。目标是用项目已有的 `reqwest` 直接实现 OpenAI `/v1/chat/completions` 请求/响应，移除 `llm` 依赖，并新增可返回 token 流的 `chat_stream` 方法，供后续 Web UI 聊天式改稿使用。
+
+**推荐方案**：新增独立 `src/llm/` 模块，自包含 OpenAI 兼容客户端。流水线三阶段改为依赖自定义的 `ChatClient` trait/struct；config 移除 `parse_backend`，保留 `backend` 字段作日志/展示。结构化输出继续走 `response_format: json_schema` 严格模式，保持与现有 schema 函数（`script_schema`/`segment_schema`）兼容。
+
+### Phase 1：梳理与类型设计
+
+1. 在 `src/llm/` 下创建：
+   - `mod.rs` — 模块入口，暴露 `ChatClient`、`ChatMessage`、`ChatResponse`、`ChatStream` 等。
+   - `client.rs` — `OpenAiClient` 实现：`new(config: &ModelConfig)` 构造 reqwest Client；`chat(...)`/`chat_stream(...)` 发送请求。
+   - `types.rs` — 请求/响应类型：手动实现 OpenAI schema（roles、messages、response_format json_schema、choices、usage、finish_reason、OpenAIError 等）。
+2. 在 `src/script.rs` 中：
+   - 移除 `use llm::chat::StructuredOutputFormat`。
+   - 保留 `script_schema()`/`segment_schema()` 的返回类型，改为自实现的 `JsonSchemaFormat`（或等价结构），保持字段语义：name、description、schema、strict。
+3. 在 `src/config.rs` 中：
+   - 移除 `llm::builder::LLMBackend` 导入。
+   - 移除/弃用 `ModelConfig::parse_backend()`，仅保留 `backend: String` 字段用于展示。
+4. 保留 `src/error.rs` 中的 `StoryorError::Llm(String)` 变体，新增 `From` 转换。
+
+### Phase 2：流水线三阶段接入新客户端
+
+1. `src/pipeline/mod.rs` — 将 `small_model`/`large_model: &'a dyn ChatProvider` 替换为自定义 trait object。
+2. `src/pipeline/summary.rs` — 替换 import 与调用，summary 用普通文本响应。
+3. `src/pipeline/segment.rs` — 替换 import，请求体带 `response_format: Some(segment_schema())`。
+4. `src/pipeline/script.rs` — 替换 import，请求体带 `response_format: Some(script_schema())`。
+5. `src/script.rs` 的 `StructuredOutputFormat` 替换为新类型后，调整所有引用点。
+
+### Phase 3：流式接口与服务器侧预留
+
+1. 在 `src/llm/client.rs` 实现 `chat_stream(messages, options)`：
+   - 请求体 `stream: true`。
+   - 用 `reqwest::Response::bytes_stream()` + `futures_util::StreamExt` 解析 SSE line。
+   - 输出 `impl Stream<Item = Result<String, StoryorError>>`（每次 yield 一个 content delta；遇到 `[DONE]` 结束）。
+   - 流式响应仅在普通 chat 场景使用，不用于 `json_schema` 严格输出路径。
+2. 在 `src/server/types.rs` 新增 Web UI 聊天请求/响应类型（如果当前不存在）。
+3. 在 `src/server/routes/mod.rs` 预留 `/api/chat` 路由，用于后续 Web UI 改稿。
+
+### Phase 4：测试 mock 替换
+
+1. `tests/common/mod.rs`
+   - 移除 `llm` crate 的所有 import。
+   - 改为基于自定义 `ChatClient` trait 实现 `MockProvider`：保留「按调用顺序消费预设响应文本」和「记录 user 消息」的行为。
+2. `tests/pipeline_stages.rs` 与 `tests/full_pipeline.rs` — 调整 import 与 test_config 字段。
+
+### Phase 5：依赖与文档清理
+
+1. `Cargo.toml` — 删除 `llm = "1.3.8"` 整行。
+2. `Cargo.lock` — 通过 `cargo update` 或重新 `cargo build` 移除 `llm` 子依赖。
+3. `PLAN.md` — 删除或替换 llm 相关内容（如 `LLMBuilder::schema()`、`llm` crate 等）。
+4. `README.md` — 更新「可用 LLM 服务」说明为「OpenAI 兼容 chat/completions 服务」。
+5. `STATUS.md` — 新增条目：移除 `llm` 依赖，新增 `src/llm/` 模块，`chat_stream` 实现。
+
+### Phase 6：验证
+
+1. `cargo check` 全工程无错。
+2. `cargo test` 全部通过，尤其：
+   - `tests/pipeline_stages.rs`（summary/segment/script 三阶段）
+   - `tests/full_pipeline.rs`（checkpoint）
+   - `tests/common/mod.rs` 中 mock 测试
+   - `tests/export_bindings.rs`（ts-rs 导出 + axfetchum 生成）
+3. 手动构造最小配置测试非流式 chat 调用，验证 HTTP 请求体符合 OpenAI schema。
+
+### 关键文件
+
+- `Cargo.toml` — 删除 `llm`，必要时确认 `reqwest`/`futures` 版本。
+- `src/error.rs` — 保留/扩展 LLM 错误转换。
+- `src/config.rs` — 移除 `parse_backend()` 与 `LLMBackend` 导入。
+- `src/script.rs` — 替换 `StructuredOutputFormat` 类型及 schema 函数返回类型。
+- `src/llm/mod.rs`、`src/llm/client.rs`、`src/llm/types.rs`（新增）— 自定义客户端核心。
+- `src/pipeline/mod.rs`、`src/pipeline/summary.rs`、`src/pipeline/segment.rs`、`src/pipeline/script.rs` — 接入新 `ChatClient`。
+- `tests/common/mod.rs`、`tests/pipeline_stages.rs`、`tests/full_pipeline.rs` — mock 替换。
+- `PLAN.md`、`README.md`、`STATUS.md` — 文档更新。
+
+### 决策与范围边界
+
+- **包含**：完全移除 `llm` crate；用 `reqwest` 实现非流式 `chat`；新增流式 `chat_stream`；更新流水线、测试、文档。
+- **包含**：继续通过 `response_format: {type: "json_schema"}` 获得 `segment`/`script` 的严格 JSON 输出。
+- **包含**：`backend` 字段保留当展示/日志，不再解析为 enum。
+- **不包含**：Web UI 聊天改稿的完整 UI 与 handler 逻辑（只预留 `chat_stream` 与路由骨架）。
+- **不包含**：Ollama/DeepSeek 等方言适配，统一按 OpenAI 兼容接口处理，base_url 可覆盖。
+- **不包含**：function/tool calling、`temperature`/`top_p` 等模型参数配置化（后续按需扩展）。
+

@@ -4,22 +4,22 @@
 //! （受 `max_concurrency` 限制）。结果落盘 `<output>/summaries.json`。
 
 use futures::stream::{self, StreamExt};
-use llm::chat::{ChatMessage, ChatProvider};
 use tracing::info;
 
 use crate::checkpoint::{read_artifact, write_artifact};
 use crate::config::AppConfig;
 use crate::error::{Result, StoryorError};
+use crate::llm::{ChatClient, ChatMessage};
 use crate::script::{Chapter, ChapterSummary};
 
 /// 章节摘要生成器
 pub struct SummaryStage<'a> {
     config: &'a AppConfig,
-    small_model: &'a dyn ChatProvider,
+    small_model: &'a dyn ChatClient,
 }
 
 impl<'a> SummaryStage<'a> {
-    pub fn new(config: &'a AppConfig, small_model: &'a dyn ChatProvider) -> Self {
+    pub fn new(config: &'a AppConfig, small_model: &'a dyn ChatClient) -> Self {
         Self { config, small_model }
     }
 
@@ -46,15 +46,10 @@ impl<'a> SummaryStage<'a> {
                 let small_model = self.small_model;
                 async move {
                     let messages = vec![
-                        ChatMessage::assistant()
-                            .content("你是小说摘要助手，请用 1-2 句话概括章节核心剧情。")
-                            .build(),
-                        ChatMessage::user().content(prompt).build(),
+                        ChatMessage::assistant("你是小说摘要助手，请用 1-2 句话概括章节核心剧情。"),
+                        ChatMessage::user(prompt),
                     ];
-                    let resp = small_model
-                        .chat(&messages)
-                        .await
-                        .map_err(|e| StoryorError::Llm(e.to_string()))?;
+                    let resp = small_model.chat(&messages).await?;
                     let summary = resp
                         .text()
                         .ok_or_else(|| StoryorError::Llm("摘要响应无文本".into()))?;

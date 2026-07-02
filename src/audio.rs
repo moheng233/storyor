@@ -7,35 +7,91 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use base64::Engine;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use symphonia::core::audio::{Audio, GenericAudioBufferRef};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::checkpoint::write_artifact;
 use crate::config::AppConfig;
-use crate::error::Result;
+use crate::error::{Result, StoryorError};
+use crate::llm::{ChatMessage, TtsClient};
 use crate::script::{AudioClip, Script};
-use crate::tts::client::TtsClient;
 
 /// 音频合成阶段
 pub struct AudioStage<'a> {
     config: &'a AppConfig,
-    tts_client: &'a TtsClient,
+    tts_client: &'a dyn TtsClient,
 }
 
 impl<'a> AudioStage<'a> {
-    pub fn new(config: &'a AppConfig, tts_client: &'a TtsClient) -> Self {
+    pub fn new(config: &'a AppConfig, tts_client: &'a dyn TtsClient) -> Self {
         Self { config, tts_client }
+    }
+
+    /// 合成单句台词的音频（业务逻辑：guidance 注入 → chat_audio → base64 解码）
+    async fn synthesize_single(
+        &self,
+        speaker: &str,
+        content: &str,
+        description: &str,
+        library: &crate::script::CharacterLibrary,
+    ) -> Result<Vec<u8>> {
+        let guidance = library
+            .get(speaker)
+            .map(|c| c.guidance.as_str())
+            .unwrap_or("");
+
+        let user_prompt = if guidance.is_empty() {
+            description.to_string()
+        } else {
+            format!("{description}\n音色设定：{guidance}")
+        };
+
+        let messages = vec![
+            ChatMessage::user(user_prompt),
+            ChatMessage::assistant(content.to_string()),
+        ];
+
+        debug!(
+            "TTS 请求：{} \"{}\"",
+            speaker,
+            content.chars().take(40).collect::<String>()
+        );
+
+        let resp = self
+            .tts_client
+            .chat_audio(&messages, "mp3", None)
+            .await?;
+
+        let audio = resp
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.audio)
+            .ok_or_else(|| StoryorError::Llm("TTS 响应中未找到 audio.data 字段".into()))?;
+
+        let audio_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&audio.data)
+            .map_err(StoryorError::from)?;
+
+        debug!(
+            "TTS 合成完成：{} \"{}\" {} 字节",
+            speaker,
+            content.chars().take(30).collect::<String>(),
+            audio_bytes.len()
+        );
+        Ok(audio_bytes)
     }
 
     /// 对所有剧本合成音频（逐行合成，每次 TTS 调用只含一对 user/assistant）
     pub async fn run(&self, scripts: &[Script], completed: &HashSet<usize>) -> Result<()> {
         let audio_dir = self.config.output_dir.join("audio");
-        let format = self.tts_client.audio_format();
+        let format = &self.config.audio_format;
 
         let mut clips: Vec<AudioClip> = load_existing_manifest(&self.config.output_dir)?;
 
@@ -79,8 +135,7 @@ impl<'a> AudioStage<'a> {
                         script.segment_index, paragraph.index, line_idx, line.speaker
                     );
                     match self
-                        .tts_client
-                        .synthesize_line(&line.speaker, &line.content, &line.description, &script.characters)
+                        .synthesize_single(&line.speaker, &line.content, &line.description, &script.characters)
                         .await
                     {
                         Ok(audio_bytes) => {

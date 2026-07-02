@@ -35,7 +35,6 @@ use crate::error::{Result, StoryorError};
 
 /// 四阶段流水线的阶段标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectPhase {
     /// 刚创建，尚未开始预处理
@@ -60,7 +59,6 @@ impl Default for ProjectPhase {
 
 /// 项目元信息（持久化到 `project.json`）
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
 pub struct ProjectMeta {
     /// 项目唯一 ID（UUID v4，同时作为目录名）
     pub id: String,
@@ -104,7 +102,6 @@ impl ProjectMeta {
 
 /// 项目列表条目（不含大体积产物，仅元信息）
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
 pub struct ProjectListItem {
     pub id: String,
     pub name: String,
@@ -127,7 +124,6 @@ impl From<&ProjectMeta> for ProjectListItem {
 
 /// 创建项目的请求体
 #[derive(Debug, Clone, Deserialize, TS)]
-#[ts(export)]
 pub struct CreateProjectRequest {
     /// 项目名称
     pub name: String,

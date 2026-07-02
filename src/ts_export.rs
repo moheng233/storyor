@@ -11,7 +11,6 @@
 //! use crate::register_ts;
 //!
 //! #[derive(TS)]
-//! #[ts(export)]
 //! pub struct Foo { ... }
 //!
 //! register_ts!(Foo);
@@ -60,7 +59,6 @@ inventory::collect!(&'static TsExportable);
 ///
 /// ```ignore
 /// #[derive(TS)]
-/// #[ts(export)]
 /// pub struct ProjectMeta { ... }
 ///
 /// crate::register_ts!(ProjectMeta);

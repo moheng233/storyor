@@ -5,16 +5,16 @@
 
 use std::collections::HashSet;
 
-use llm::chat::ChatProvider;
 use tracing::info;
 
 use crate::audio::AudioStage;
 use crate::checkpoint::{config_hash, sha256_hex, CheckpointManager};
 use crate::config::AppConfig;
 use crate::error::{Result, StoryorError};
+use crate::llm::ChatClient;
 use crate::novel::ChapterSplitter;
 use crate::script::{Chapter, ChapterSummary, PlotSegment, Script};
-use crate::tts::client::TtsClient;
+use crate::llm::TtsClient;
 
 pub mod script;
 pub mod segment;
@@ -23,17 +23,17 @@ pub mod summary;
 /// 流水线
 pub struct Pipeline<'a> {
     config: &'a AppConfig,
-    small_model: &'a dyn ChatProvider,
-    large_model: &'a dyn ChatProvider,
-    tts_client: &'a TtsClient,
+    small_model: &'a dyn ChatClient,
+    large_model: &'a dyn ChatClient,
+    tts_client: &'a dyn TtsClient,
 }
 
 impl<'a> Pipeline<'a> {
     pub fn new(
         config: &'a AppConfig,
-        small_model: &'a dyn ChatProvider,
-        large_model: &'a dyn ChatProvider,
-        tts_client: &'a TtsClient,
+        small_model: &'a dyn ChatClient,
+        large_model: &'a dyn ChatClient,
+        tts_client: &'a dyn TtsClient,
     ) -> Self {
         Self {
             config,

@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use llm::builder::LLMBackend;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -32,11 +31,12 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
-    /// 解析为 `LLMBackend` 枚举
-    pub fn parse_backend(&self) -> Result<LLMBackend, String> {
-        self.backend
-            .parse::<LLMBackend>()
-            .map_err(|e| format!("无法解析后端 `{}`: {e}", self.backend))
+    /// 后端名称（仅用于展示/日志，不参与实际调用）
+    ///
+    /// 历史上曾解析为 `LLMBackend` 枚举。当前统一按 OpenAI 兼容
+    /// chat/completions 接口处理，`base_url` 决定实际服务商。
+    pub fn backend_label(&self) -> &str {
+        &self.backend
     }
 }
 

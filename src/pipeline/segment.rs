@@ -3,22 +3,22 @@
 //! 把所有章节摘要交给大模型，输出 `Vec<PlotSegment>`（含起止章节、剧情概述）。
 //! 用 `StructuredOutputFormat` 保证 JSON。落盘 `<output>/segments.json`。
 
-use llm::chat::{ChatMessage, ChatProvider};
 use tracing::info;
 
 use crate::checkpoint::{read_artifact, write_artifact};
 use crate::config::AppConfig;
 use crate::error::{Result, StoryorError};
-use crate::script::{ChapterSummary, PlotSegment, SegmentList};
+use crate::llm::{ChatClient, ChatMessage};
+use crate::script::{segment_schema, ChapterSummary, PlotSegment, SegmentList};
 
 /// 剧情段切分阶段
 pub struct SegmentStage<'a> {
     config: &'a AppConfig,
-    large_model: &'a dyn ChatProvider,
+    large_model: &'a dyn ChatClient,
 }
 
 impl<'a> SegmentStage<'a> {
-    pub fn new(config: &'a AppConfig, large_model: &'a dyn ChatProvider) -> Self {
+    pub fn new(config: &'a AppConfig, large_model: &'a dyn ChatClient) -> Self {
         Self { config, large_model }
     }
 
@@ -46,17 +46,14 @@ impl<'a> SegmentStage<'a> {
         info!("开始剧情段切分（{} 章摘要）", summaries.len());
 
         let messages = vec![
-            ChatMessage::assistant()
-                .content("你是剧情结构分析师，请将章节摘要按剧情弧线切分为若干剧情段。")
-                .build(),
-            ChatMessage::user().content(prompt).build(),
+            ChatMessage::assistant("你是剧情结构分析师，请将章节摘要按剧情弧线切分为若干剧情段。"),
+            ChatMessage::user(prompt),
         ];
 
         let resp = self
             .large_model
-            .chat(&messages)
-            .await
-            .map_err(|e| StoryorError::Llm(e.to_string()))?;
+            .chat_with_schema(&messages, Some(&segment_schema()))
+            .await?;
 
         let text = resp
             .text()
