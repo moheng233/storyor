@@ -1,175 +1,156 @@
 # storyor 开发状态
 
-## 当前阶段：v2 交互式工作流 + Web UI 架构升级 — Phase A 完成 ✅
+## 当前阶段：v2 交互式工作流 + Web UI 架构升级进行中
 
-## 最新变更：移除 `llm` crate，改用 reqwest 直连 OpenAI chat_completions ✅
+整体规划见 `PLAN.md`。下表按 Phase A–E 与附加子计划汇总当前完成度，已完成项已从 PLAN 中清除，未完成项保留在 PLAN 中。
 
-- [x] **动机**：不再依赖第三方 `llm` crate，直接用项目已有的 `reqwest` 实现 OpenAI 兼容 `/v1/chat/completions` 客户端，降低依赖面、便于扩展流式输出。
-- [x] **新增 `src/llm/` 模块**（自包含 OpenAI 兼容客户端）：
-  - `src/llm/mod.rs` — 模块入口，定义 `ChatClient` trait（`chat` / `chat_with_format`），导出 `ChatMessage`/`ChatResponse`/`Choice`/`ResponseFormat`/`JsonSchemaFormat`/`Role` 等。
-  - `src/llm/types.rs` — 手动实现 OpenAI 请求/响应类型（`ChatCompletionRequest`、`ResponseFormat::{Text,JsonObject,JsonSchema}`、`JsonSchemaFormat`、`ChatResponse`、`Choice`、`Usage`、`OpenAiErrorBody`）。`ChatMessage` 提供 `system()`/`user()`/`assistant()` 构造器。
-  - `src/llm/client.rs` — `OpenAiClient`（基于 `reqwest`）：`new(ModelConfig)`、`chat_with_format()` 走 `response_format: json_schema` 严格结构化输出；`chat_stream()` 返回 `impl Stream<Item = Result<String>>`，SSE 解析 `data:` 增量 content，遇 `[DONE]` 结束（供后续 Web UI 聊天改稿使用）。
-- [x] **结构化输出保留严格模式**：`segment`/`script` 阶段通过 `response_format: {type: "json_schema", json_schema: ...}` 强制 JSON，`script_schema()`/`segment_schema()` 返回类型由 `StructuredOutputFormat` 改为自实现 `JsonSchemaFormat`（字段语义不变）。
-- [x] **config 简化**：移除 `llm::builder::LLMBackend` 导入与 `ModelConfig::parse_backend()`，新增 `backend_label()`（仅展示/日志）；`backend` 字段保留为字符串，所有服务按 OpenAI 兼容接口处理，`base_url` 决定实际服务商。
-- [x] **流水线接入新 trait**：`Pipeline`/`SummaryStage`/`SegmentStage`/`ScriptStage` 的 `small_model`/`large_model` 从 `&dyn ChatProvider` 改为 `&dyn ChatClient`；消息构造改为 `ChatMessage::assistant(...)` / `ChatMessage::user(...)`；`segment`/`script` 调用 `chat_with_format(..., Some(ResponseFormat::JsonSchema{...}))`。
-- [x] **测试 mock 替换**：`tests/common/mod.rs` 移除全部 `llm` import，改为基于 `storyor::llm::ChatClient` 的 `MockProvider`（保留队列消费与 user 消息记录行为），并提供 `mock_response()` 辅助；`tests/pipeline_stages.rs` / `tests/full_pipeline.rs` 的 `test_config` 补全缺失字段（`max_tokens`、`voice_*`、`server`/`workspace`/`timing`/`sounds`）。
-- [x] **依赖清理**：`Cargo.toml` 删除 `llm = "1.3.8"`，新增 `async-stream = "0.3"`、`bytes = "1"`、`async-trait`（移至正式依赖），`reqwest` 启用 `stream` feature；`Cargo.lock` 已无 `llm` 子依赖。
-- [x] **验证**：`cargo check --all-targets` 通过；`cargo test` **50 个测试全部通过**（单元 35 + pipeline_stages 8 + full_pipeline 6 + export_bindings 1）。
+### ✅ 已完成
 
-> 备注：流式 `chat_stream` 已实现但暂未在流水线中使用；后续 Web UI 聊天改稿路由（`/api/chat`）将基于它落地。
-
----
-
-## 最新变更：Phase A 后端基础设施落地 ✅
-
-- [x] **依赖**：`Cargo.toml` 新增 `axum`/`tower`/`tower-http`/`uuid`/`axfetchum`(含 `axum` feature)/`ts-rs`(含 `chrono-impl` feature)
-- [x] **错误类型**：`src/error.rs` 为 `StoryorError` 实现 `axum::response::IntoResponse`，统一返回 `{"error": msg}` JSON（项目未找到→404，其余→500）
-- [x] **配置扩展**：`src/config.rs` 新增 `ServerConfig`(host/port)、`WorkspaceConfig`(dir)、`TimingConfig`、`SoundsConfig`；CLI 简化为单一 `server` 模式（移除 V1 pipeline 子命令）
-- [x] **项目管理**：`src/project.rs` — `ProjectManager` 实现按 `workspace_dir/<id>/` 分目录的 CRUD（list/create/get/delete），`ProjectMeta`/`ProjectListItem`/`ProjectPhase`/`CreateProjectRequest` 标注 `#[derive(TS)]` 自动导出 TS 类型
-- [x] **server 模块**：
+#### Phase A：后端基础设施
+- 依赖：`Cargo.toml` 引入 `axum`/`tower`/`tower-http`/`uuid`/`axfetchum`(含 `axum` feature)/`ts-rs`(含 `chrono-impl` feature)
+- 错误类型：`src/error.rs` 的 `StoryorError` 实现 `axum::response::IntoResponse`，统一返回 `{"error": msg}` JSON（项目未找到→404，其余→500）
+- 配置扩展：`src/config.rs` 新增 `ServerConfig`(host/port)、`WorkspaceConfig`(dir)、`TimingConfig`、`SoundsConfig`；CLI 简化为单一 `server` 模式（移除 v1 pipeline 子命令）
+- 项目管理：`src/project.rs` — `ProjectManager` 实现按 `workspace_dir/<id>/` 分目录的 CRUD（list/create/get/delete），`ProjectMeta`/`ProjectListItem`/`ProjectPhase`/`CreateProjectRequest` 标注 `#[derive(TS)]`
+- server 模块：
   - `src/server/mod.rs` — `run_server(config)` 启动 axum，`build_router` 组装路由 + CORS + 静态文件 fallback
   - `src/server/state.rs` — `AppState`（config + ProjectManager）
-  - `src/server/types.rs` — `HealthResponse`/`ErrorResponse`（`#[derive(TS)]`）
-  - `src/server/routes/mod.rs` — **axfetchum `ApiRouter` builder 模式**（별 `api_routes!` 宏），一次定义同步产出真实 axum `Router` + `RouteCollection` 元数据；含 projects CRUD、健康检查、静态文件服务、绑定导出
-  - `src/server/events.rs` — 进度事件骨架（Phase B 填充）
-- [x] **前端 TS 绑定导出**：`tests/export_bindings.rs` 使用 `ts_rs::TS::export_all(&Config)` 显式导出类型定义 + `axfetchum::generate_to_file` 生成 API 客户端，产物落在 `frontend/src/bindings/`（`api.ts` + 各类型 `.ts`）
-- [x] **CLI 入口**：`src/main.rs` 重写为 `server` 子命令入口（V1 pipeline 不再保留）
-- [x] 编译通过、`cargo test --test export_bindings` 通过
+  - `src/server/types.rs` — `HealthResponse`/`ErrorResponse`
+  - `src/server/routes/mod.rs` — `axfetchum::ApiRouter` builder 模式，一次产出 axum `Router` + `RouteCollection` 元数据；含 projects CRUD、健康检查、静态文件服务
+  - `src/server/events.rs` — 进度事件类型骨架（`ProgressEvent` 枚举）
+- 前端 TS 绑定导出：`tests/export_bindings.rs` 用 `ts_rs::TS::export_all(&Config)` 显式导出类型 + `axfetchum::generate_to_file` 生成 API 客户端，产物在 `frontend/src/bindings/`
+- CLI 入口：`src/main.rs` 重写为 `server` 子命令入口
 
-> 备注：PLAN.md 原文用 `api_routes!` 宏，按用户要求改用 `ApiRouter` builder（axfetchum 官方推荐 Option A），单一来源、零重复声明。
+#### 子计划：用 reqwest 替换 `llm` crate
+完全移除 `llm` crate，改为基于 `reqwest` 直连 OpenAI 兼容 `/v1/chat/completions` 客户端：
 
----
+- 新增 `src/llm/` 模块，自包含 OpenAI 兼容客户端
+  - `src/llm/mod.rs` — 模块入口，定义 `ChatClient` trait（三方法：`chat` / `chat_with_schema` / `chat_stream`）与 `TtsClient` trait（`chat_audio`），导出 `ChatMessage`/`ChatResponse`/`Choice`/`ResponseFormat`/`JsonSchemaFormat`/`Role` 等；`ChatDeltaStream<'a> = Pin<Box<dyn Stream<Item = Result<String>> + Send + 'a>>`
+  - `src/llm/types.rs` — 手动 serde 结构：`ChatCompletionRequest`（含 `model`/`messages`/`response_format`/`audio`/`max_tokens`/`temperature`/`stream`）、`ResponseFormat::{Text,JsonObject,JsonSchema}`、`JsonSchemaFormat`、`ChatResponse`、`Choice`、`ResponseMessage`（含 `audio` 字段）、`AudioConfig`/`AudioData`、`OpenAiErrorBody`
+  - `src/llm/client.rs` — `OpenAiClient`（`new` / `with_options`）同时实现 `ChatClient` 与 `TtsClient`；流式 `chat_stream` 通过 `async_stream` + `bytes_stream()` 解析 SSE；`ChatCompletionRequest.stream` 字段由 `build_stream_request` 显式设置，不再手动注入 JSON
+  - `src/llm/error.rs` — `OpenAiError` 枚举严格类型化错误（`RequestFailed`/`BadStatus`/`Deserialize`/`SseParse`/`NoText`/`NoAudioData`），通过 `From<OpenAiError> for StoryorError` 自动上转
+- 配置简化：移除 `llm::builder::LLMBackend` 与 `ModelConfig::parse_backend()`，新增 `backend_label()`（仅展示）；`backend` 字段保留为字符串，所有服务按 OpenAI 兼容接口处理，`base_url` 决定实际服务商
+- 流水线接入新 trait：
+  - `Pipeline`/`SummaryStage`/`SegmentStage`/`ScriptStage` 的 `small_model`/`large_model` 从 `&dyn ChatProvider` 改为 `&dyn ChatClient`
+  - summary 用普通文本对话；segment/script 调用 `chat_with_schema(messages, Some(&segment_schema()/script_schema()))` 走 `json_schema` 严格模式
+  - `script_schema()`/`segment_schema()` 返回类型改为自实现 `JsonSchemaFormat`，字段语义不变
+- TTS 客户端简化为底层接口：
+  - `TtsClient` trait 只提供 `chat_audio(messages, audio_format, voice) -> Result<ChatResponse>`，业务逻辑（guidance 注入、消息构造、base64 解码）由调用方负责
+  - `AudioStage`/`Pipeline` 的 `tts_client` 字段改为 `&dyn TtsClient`（trait object）
+  - `src/audio.rs` 内联 `synthesize_single` 辅助方法完成业务逻辑
+  - 旧的 `src/tts/` 兼容模块已废弃（重导出 `crate::llm::TtsClient`，待清理删除）
+- 依赖清理：`Cargo.toml` 删除 `llm`，新增 `async-stream`、`bytes`、`async-trait`（移至 `[dependencies]`），`reqwest` 启用 `stream` feature；`Cargo.lock` 已无 `llm` 子依赖
+- 测试：
+  - `tests/common/mod.rs` 改为基于 `ChatClient` trait 的 `MockProvider`，实现三方法（含流式 mock），并提供 `mock_response()` 构造 `ChatResponse`
+  - `tests/pipeline_stages.rs` / `tests/full_pipeline.rs` 的 `test_config` 补全缺失字段
+  - 验证：`cargo check --all-targets` 无 warning，`cargo test` 全部通过（单元 16 + pipeline_stages 8 + full_pipeline 6 + export_bindings 1 = 31 测试全绿）
 
-## 最新变更：v2 计划已制定 ✅
+### ⏳ 未完成（详见 PLAN.md）
 
-- [x] `PLAN.md` 已更新为 v2 完整架构计划（四阶段交互式工作流 + axum + React）
-- [x] 决策确认：Rust axum 后端 + React SPA 前端、音色分离设计（voicedesign → voiceclone）、文件系统持久化、本地运行
-- [x] **前后端类型安全策略**：使用 `ts-rs`（`#[derive(TS)]` + `TS::export_all` 显式导出 TS 类型定义）+ `axfetchum`（`ApiRouter` builder 一次产出 axum 路由与 TS API 客户端），Rust 为单一事实来源
-- [x] Phase A：后端基础设施（server 模块 + 项目管理 + ts-rs/axfetchum 集成）✅
-- [ ] Phase B：流水线解耦 + 进度事件 + TTS 双模式改造
-- [ ] Phase C：REST API 端点实现
-- [ ] Phase D：React 前端开发
-- [ ] Phase E：配置扩展 + CLI 适配 + 构建整合
+#### Phase B：流水线解耦与进度事件
+- [ ] 流水线阶段拆分为独立可调用阶段函数（按项目目录读写产物）
+- [ ] `ProgressEvent` 接入 `AppState` 的 `broadcast::Sender`，SSE endpoint `GET /api/projects/:id/events`
+- [ ] ~~`src/tts/client.rs` 双模式（design_voice / clone_voice）~~ — 方案已调整为：TTS 客户端走通用 `chat_audio`，业务上移到 `audio.rs`；voice_design/voice_clone 的具体落地待定
 
----
+#### Phase C：API 端点
+除 `projects` CRUD 之外，其余端点均未实现：
+- [ ] 预处理端点（章节/摘要/段的 GET/PUT + 启动任务）
+- [ ] 剧本端点（生成/单段重新生成/对话式修改/直接编辑）
+- [ ] 音色设计端点（设计/试听/确认）
+- [ ] 音频合成端点（按 action 序列处理 say/wait/play）
+- [ ] SSE 进度端点
 
-## v1 状态：项目架构搭建完成 ✅
+#### 待重构
+- [ ] `src/script.rs` — 从 `ScriptLine` 重构为 `Action` 枚举（`Say`/`Wait`/`Play`），同步 `script_schema()` 改为 action-based
+- [ ] `src/audio.rs` — 音频合成从逐行拼接改为 action 序列交叉拼接（TTS + 静音 + 音效）
+- [ ] `src/sounds.rs`（新增）— 预置音效库管理（从 `assets/sounds/index.toml` 加载）
+- [ ] `src/character.rs` — 添加 `#[derive(TS)]` 导出角色类型
+- [ ] `src/checkpoint.rs` — 适配新阶段定义（preprocess/scripts/voices/audio）
+- [ ] `prompts/script.md` / `prompts/story_teller.md` — 适配 action 序列输出
 
-## 最新人工验证：小样本真实调用（run4）
+#### Phase D：React 前端
+- [x] 项目脚手架存在（`frontend/` 目录 + `frontend/src/bindings/` 自动生成产物）
+- [ ] 页面与路由（项目列表/仪表盘/预处理/剧本/音色/音频）
+- [ ] 核心组件（`PhaseStepper`/`ChapterEditor`/`SegmentTimeline`/`ScriptEditor`/`RegeneratePanel`/`ChatPanel`/`CharacterCard`/`VoiceDesigner`/`AudioProgressBar`/`useEventStream`）
 
-- [x] 输入样本：`output/sample_1ch.txt`（约 1 万字）
-- [x] 章节切分成功：1 章
-- [x] 章节摘要成功，产物见 `output/run4/summaries.json`
-- [x] 剧情段切分成功，产物见 `output/run4/segments.json`
-- [ ] 剧本生成到达真实模型调用，但当前返回 JSON 结构与 `ScriptBody` 不完全匹配，报错：`invalid type: string "handoff", expected struct Paragraph`
-- [ ] 因剧本 JSON 结构问题，首轮人工验证已确认 `chat/completions + json_object` 路径可用，但还需要进一步增强剧本阶段的输出约束或增加重试/修复逻辑
+#### Phase E：配置与构建整合
+- [x] 配置文件 `[server]` / `[workspace]` / `[timing]` / `[sounds]` 已落地
+- [x] `[voice_design_model]` / `[voice_clone_model]` 字段已加（`Option<ModelConfig>`）
+- [ ] CLI 子命令适配（`storyor server` / `storyor pipeline`）
+- [ ] 构建脚本（开发并行 / 生产构建）
 
-## 最新变更：收紧剧本提示词 ✅
+### 待清理
+- [ ] `src/tts/` 目录（已废弃的死代码，重导出 `crate::llm::TtsClient`，未再被 lib.rs 引用，可直接删）
 
-- [x] 收紧 `prompts/story_teller.md` 的系统约束，明确顶层只能有 `characters`、`paragraphs`、`handoff`
-- [x] 明确 `paragraphs` 必须是段落对象数组，禁止混入字符串或把 `handoff` 放入其中
-- [x] 明确 `lines`/`tags` 的字段和类型要求
-- [x] 增加“正确示例 / 错误示例”，直接约束当前已出现的 `"handoff"` 混入 `paragraphs` 问题
-- [x] 未引入自动重试逻辑
+## v1 状态：CLI 流水线核心已完成 ✅
 
-## 最新变更：台词内容内联情绪/动作 ✅
+v1 的核心流水线（章节切分 → 章节摘要 → 剧情段切分 → 剧本生成 → TTS 合成 → 音频落盘 + 断点续跑）在 `src/pipeline/`、`src/novel/`、`src/audio.rs`、`src/checkpoint.rs` 中保留并已被新客户端接入。集成测试覆盖完整流水线与续跑。
 
-- [x] `ScriptLine` 改为仅保留 `speaker` + `content`
-- [x] 不再要求 LLM 输出 `tags` 字段
-- [x] 情绪、动作、语速提示直接内联到 `content`，例如：`（紧张，深呼吸）呼……冷静，冷静。`
-- [x] TTS 直接消费 `content`，不再额外拼接 `（情绪：...）`
+## 模块结构（当前）
 
-## 已完成
-
-### Phase 1: 基础设施
-- [x] `src/error.rs` — 统一错误类型 `StoryorError`（thiserror，含 IO/LLM/Json/Regex/Base64/Http/Checkpoint/Config/Parse/Prompt 变体）
-- [x] `src/config.rs` — `ModelConfig` ×3（small/large/tts）+ `AppConfig` 全局参数 + clap CLI（`--input/--config/--output/--resume/--force/--audio-format/--concurrency/--chapter-regex`），支持 TOML/JSON 配置文件加载
-- [x] `src/script.rs` — 核心数据结构（`Chapter`/`ChapterSummary`/`PlotSegment`/`CharacterProfile`/`CharacterLibrary`/`ScriptLine`/`Paragraph`/`Script`/`AudioClip`/`SegmentList`/`ScriptBody`）+ serde + `StructuredOutputFormat` schema 构造函数（`script_schema`/`segment_schema`）
-
-### Phase 2: 小说解析与章节摘要
-- [x] `src/novel/chapter.rs` — 正则章节切分 `ChapterSplitter`，支持边界（无标题/单章/序言/空内容/自定义正则），含 5 个单元测试
-- [x] `src/pipeline/summary.rs` — 章节摘要（小模型，`buffer_unordered` 并发，受 `max_concurrency` 限制）
-
-### Phase 3: 剧情段切分与剧本生成
-- [x] `src/pipeline/segment.rs` — 剧情段切分（大模型，`StructuredOutputFormat` 保证 JSON，含 `parse_json_response` 兼容 ```json 代码块）
-- [x] `src/pipeline/script.rs` — 剧本生成（大模型，顺序，注入「上段 handoff + 当前角色库 + 本段原文」，落盘 script/handoff/characters）
-- [x] `src/character.rs` — `CharacterLibrary::merge`/`merge_library`/`render_for_prompt`，含 3 个单元测试
-
-### Phase 4: TTS 合成与音频输出
-- [x] `src/tts/client.rs` — `TtsClient` 封装，**绕过 `ChatProvider` trait**，直接 HTTP 调用 chat 接口，反序列化原始 JSON 提取 `choices[0].message.audio.data` 做 base64 解码；多轮消息构造 `[assistant(guidance), user(text), ...]`
-- [x] `src/audio.rs` — 音频落盘 `audio/segment_{i:04}/paragraph_{j:04}.{fmt}` + `manifest.json` 生成（支持段内续跑）
-
-### Phase 5: 编排与断点续跑
-- [x] `src/checkpoint.rs` — `CheckpointManager` 维护 `checkpoint.json`，校验 `novel_hash`/`config_hash`，阶段级 + 段粒度续跑，含 2 个单元测试
-- [x] `src/pipeline/mod.rs` — `Pipeline::run()` 串联 chapters→summaries→segments→scripts→audio，每阶段完成后写 checkpoint
-- [x] `src/main.rs` — CLI 入口，构建 3 个 provider（小/大/TTS，各自 `resilient()` + `validator()`）
-
-### 提示词模板
-- [x] `src/prompts.rs` — 模板加载器（工作区 → 可执行文件目录 → 内置默认）
-- [x] `prompts/story_teller.md` — 说书人风格系统提示词
-- [x] `prompts/summary.md` — 章节摘要提示词
-- [x] `prompts/segment.md` — 剧情段切分提示词
-- [x] `prompts/script.md` — 剧本生成提示词
-
-## 验证结果
-- `cargo build` ✅ 编译通过
-- `cargo test` ✅ **24 个测试全部通过**（单元 10 + 集成 14）
-  - 单元测试 10 个：`novel::chapter` 5 + `character` 3 + `checkpoint` 2
-  - 集成测试 `pipeline_stages` 8 个：摘要生成/跳过、剧情段 JSON 解析/越界钳制/代码块、剧本生成/角色库累积/续跑跳过/prompt 构造
-  - 集成测试 `full_pipeline` 6 个：checkpoint 阶段级标记/段粒度续跑/hash 变更重置/force 忽略/完整产物目录结构/续跑场景
-- `cargo clippy --all-targets` ✅ 无实质警告（仅文档格式警告，中文注释被误判）
-
-## 集成测试详情
-- `tests/common/mod.rs` — mock `ChatProvider`/`ChatResponse`（按调用顺序消费预设响应，记录收到的 user 消息）+ 测试数据
-- `tests/pipeline_stages.rs` — 各阶段独立测试
-  - `summary_stage_produces_summaries`：摘要生成 + 落盘 + 排序
-  - `summary_stage_skips_when_artifact_exists`：产物已存在时跳过
-  - `segment_stage_parses_json`：剧情段 JSON 解析 + 落盘
-  - `segment_stage_clamps_invalid_chapter_range`：越界章节范围钳制
-  - `segment_stage_parses_json_code_block`：兼容 ```json 代码块包裹
-  - `script_stage_generates_and_updates_library`：剧本生成 + 角色库累积 + handoff 落盘
-  - `script_stage_skips_completed_segments`：已完成段跳过
-  - `script_stage_prompt_includes_handoff_and_library`：prompt 含 handoff + 角色库 + 原文
-- `tests/full_pipeline.rs` — 完整流水线 + checkpoint
-  - `checkpoint_marks_stages_done`：阶段级完成标记持久化
-  - `checkpoint_segment_granularity_resume`：段粒度续跑
-  - `checkpoint_resets_on_hash_change`：hash 变更重置状态
-  - `checkpoint_force_ignores_existing`：force 模式忽略 checkpoint
-  - `full_pipeline_artifacts_layout`：完整产物目录结构验证
-  - `script_stage_resume_from_checkpoint`：续跑场景（段 0 落盘加载，段 1 新生成）
-
-## 待办（后续迭代）
-- [x] 集成测试：用 mock LLM provider 跑通 summary→segment→script 三阶段 ✅
-- [ ] 手动验证：真实小模型跑 1-3 章短篇，检查摘要/切分/剧本/角色库一致性
-- [ ] 手动验证：真实 TTS 模型跑单段剧本，检查 base64 音频提取与输出文件可播放
-- [ ] 断点续跑验证：中途 Ctrl-C 后重启，确认跳过已完成阶段
-- [x] TTS 底层通信：已用独立 `reqwest` 实现（本次进一步移除 `llm` crate，统一为自实现 OpenAI 兼容客户端）
-
-## 模块结构
 ```
 src/
-  main.rs           CLI 入口 (clap)
-  config.rs         三模型配置 + 全局参数 + CLI
-  error.rs          错误类型 (thiserror)
+  lib.rs              库入口
+  main.rs              CLI 入口（server 模式）
+  config.rs            全局 + 模型 + server/workspace/timing/sounds 配置
+  error.rs             StoryorError（含 LLM/Server/Project 变体）
+  project.rs           项目管理 CRUD
+  ts_export.rs         ts-rs 全局注册表
+  prompts.rs           提示词加载
+  character.rs         角色库管理
+  script.rs            剧本数据结构 + script_schema/segment_schema
+  audio.rs             音频落盘 + manifest + TTS 业务侧（synthesize_single）
+  checkpoint.rs        断点续跑
   novel/
+    chapter.rs         章节切分
     mod.rs
-    chapter.rs      正则章节切分
   pipeline/
-    mod.rs          流水线编排 + 断点续跑
-    summary.rs      章节摘要 (小模型, 并行)
-    segment.rs      剧情段切分 (大模型)
-    script.rs       剧本生成 (大模型, 顺序, JSON)
-  character.rs      角色库管理 + 合并更新
-  script.rs         剧本数据结构 + JSON schema
-  prompts.rs        提示词模板加载
-  tts/
-    mod.rs
-    client.rs       chat 接口 TTS 封装 + 音频提取
-  audio.rs          音频落盘 + manifest 生成
-  checkpoint.rs     产物落盘 + 续跑检查
-prompts/
+    mod.rs             流水线编排
+    summary.rs         章节摘要
+    segment.rs         剧情段切分
+    script.rs          剧本生成
+  llm/                 （新增）OpenAI 兼容客户端
+    mod.rs             ChatClient / TtsClient trait
+    types.rs           请求/响应类型
+    client.rs          OpenAiClient 实现
+    error.rs           OpenAiError 严格类型化
+  server/
+    mod.rs             axum 服务启动
+    state.rs           AppState
+    types.rs           API 类型
+    events.rs          进度事件骨架
+    routes/
+      mod.rs           路由注册（projects CRUD + 健康）
+
+frontend/
+  src/
+    bindings/          ts-rs 与 axfetchum 自动生成的 TS 类型 + API 客户端
+
+prompts/                提示词模板
   story_teller.md
   summary.md
   segment.md
   script.md
+
+tests/
+  common/mod.rs         mock ChatClient + 测试数据
+  export_bindings.rs   TS 绑定导出
+  pipeline_stages.rs   三阶段集成测试
+  full_pipeline.rs     完整流水线 + checkpoint 续跑
 ```
+
+## 验证状态
+
+- `cargo check --all-targets` 全工程通过，无 warning
+- `cargo test` 31 个测试全部通过：
+  - 单元测试 16 个（novel::chapter 5 + character 3 + checkpoint 2 + 其他 6）
+  - 集成测试 `pipeline_stages` 8 个（summary/segment/script 三阶段 + 角色库累积 + 续跑）
+  - 集成测试 `full_pipeline` 6 个（checkpoint 阶段级/段粒度续跑 + hash 变更重置 + force + 产物目录）
+  - `export_bindings` 1 个（ts-rs 导出 + axfetchum 生成）
+
+## 待办优先级建议
+
+1. 清理 `src/tts/` 死代码
+2. 完成 `script.rs` 的 Action 重构（连带 `audio.rs` 合成逻辑改造、`sounds.rs`、prompts 适配）
+3. 接入 Phase B 的进度事件系统（`AppState` 广播 + SSE 端点）
+4. 实现 Phase C 的剧本/音频端点
+5. 启动 Phase D 前端开发
